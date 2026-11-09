@@ -6,9 +6,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "@/hooks/use-toast";
+import { clearPasswordRecoveryFlag, hasPasswordRecoveryFlag, setPasswordRecoveryFlag } from "@/lib/passwordRecoveryFlag";
 import { Lock, Eye, EyeOff } from "lucide-react";
-
-const PASSWORD_RECOVERY_FLAG = "chatt-password-recovery";
 
 const isPasswordRecoveryUrl = () => {
   const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
@@ -28,7 +27,7 @@ export default function ResetPassword() {
     let mounted = true;
 
     const markReady = () => {
-      window.sessionStorage.setItem(PASSWORD_RECOVERY_FLAG, "true");
+      setPasswordRecoveryFlag();
       if (mounted) setReady(true);
     };
 
@@ -59,13 +58,13 @@ export default function ResetPassword() {
     const { data: sub } = supabase.auth.onAuthStateChange((event) => {
       if (event === "PASSWORD_RECOVERY") {
         markReady();
-      } else if (event === "SIGNED_IN" && window.sessionStorage.getItem(PASSWORD_RECOVERY_FLAG) === "true") {
+      } else if (event === "SIGNED_IN" && hasPasswordRecoveryFlag()) {
         markReady();
       }
     });
 
     supabase.auth.getSession().then(({ data }) => {
-      if (mounted && data.session && window.sessionStorage.getItem(PASSWORD_RECOVERY_FLAG) === "true") {
+      if (mounted && data.session && hasPasswordRecoveryFlag()) {
         setReady(true);
       }
     });
@@ -94,7 +93,7 @@ export default function ResetPassword() {
       return;
     }
     toast({ title: "Password updated", description: "You can now sign in with your new password." });
-    window.sessionStorage.removeItem(PASSWORD_RECOVERY_FLAG);
+    clearPasswordRecoveryFlag();
     await supabase.auth.signOut();
     navigate("/auth");
   };

@@ -13,7 +13,8 @@ type Identity = {
   identity_data?: Record<string, any>;
 };
 
-const LINK_RESTORE_KEY = "chatt-link-restore-meta";
+const LINK_RESTORE_KEY = "veyra-link-restore-meta";
+const LEGACY_LINK_RESTORE_KEY = "chatt-link-restore-meta";
 
 export default function LinkedAccounts() {
   const [identities, setIdentities] = useState<Identity[]>([]);
@@ -30,9 +31,11 @@ export default function LinkedAccounts() {
     // After returning from a Google link redirect, Supabase merges the Google
     // profile into auth.users metadata, which overwrites the user's chosen
     // display_name/username. Restore them from the snapshot we took pre-link.
-    const raw = window.localStorage.getItem(LINK_RESTORE_KEY);
+    const raw = window.localStorage.getItem(LINK_RESTORE_KEY)
+      ?? window.localStorage.getItem(LEGACY_LINK_RESTORE_KEY);
     if (raw) {
       window.localStorage.removeItem(LINK_RESTORE_KEY);
+      window.localStorage.removeItem(LEGACY_LINK_RESTORE_KEY);
       try {
         const meta = JSON.parse(raw) as { display_name?: string; username?: string };
         supabase.auth
@@ -68,6 +71,7 @@ export default function LinkedAccounts() {
       if (error) throw error;
     } catch (error: any) {
       window.localStorage.removeItem(LINK_RESTORE_KEY);
+      window.localStorage.removeItem(LEGACY_LINK_RESTORE_KEY);
       toast({ title: "Error linking Google", description: error.message, variant: "destructive" });
       setLoading(false);
     }

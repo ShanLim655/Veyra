@@ -1,1 +1,3 @@
-project_id = "ikrdlyuniuphcqtdkqnv"
+# This directory now contains historical PostgreSQL migrations only.
+# Link an Auth/Storage project explicitly before using Supabase CLI commands.
+project_id = "veyra-auth-storage"

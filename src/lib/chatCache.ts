@@ -6,8 +6,8 @@
 
 // NOTE: bump the PREFIX whenever the envelope shape changes so existing
 // cached data on users' devices is invalidated rather than mis-read.
-const PREFIX = "chatt-cache:v2:";
-const LEGACY_PREFIXES = ["chatt-cache:"];
+const PREFIX = "veyra-cache:v2:";
+const LEGACY_PREFIXES = ["chatt-cache:v2:", "chatt-cache:", "veyra-cache:"];
 const TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const MAX_MESSAGES_PER_CHANNEL = 50;
 

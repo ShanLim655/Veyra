@@ -181,7 +181,7 @@ export default function Auth() {
     <div className="min-h-screen flex items-center justify-center bg-background p-4">
       <Card className="w-full max-w-md">
         <CardHeader className="text-center">
-          <h1 className="sr-only">Sign in to Chatt</h1>
+          <h1 className="sr-only">Sign in to Veyra</h1>
           <CardTitle className="text-2xl font-bold">
             {isForgot ? "Reset your password" : isLogin ? "Welcome Back" : "Create Account"}
           </CardTitle>

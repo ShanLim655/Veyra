@@ -527,7 +527,7 @@ export function FriendsList({ onSelectConversation, selectedConversationId }: Fr
   return (
     <div className="flex flex-col h-full bg-transparent">
       <div className="p-4">
-        <h2 className="text-lg font-semibold text-sidebar-foreground mb-3">Chatt</h2>
+        <h2 className="text-lg font-semibold text-sidebar-foreground mb-3">Veyra</h2>
         <div className="flex gap-2">
           <Input
             placeholder="Add friend by username"

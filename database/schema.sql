@@ -1,0 +1,266 @@
+-- MariaDB application schema. Supabase Auth remains the identity provider;
+-- user_id / sender_id / profile id values are Supabase Auth UUIDs.
+-- Apply to a new database with: npm run db:migrate
+
+CREATE TABLE IF NOT EXISTS profiles (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  username VARCHAR(32) NOT NULL UNIQUE,
+  display_name VARCHAR(80) NULL,
+  avatar_url TEXT NULL,
+  banner_url TEXT NULL,
+  banner_gradient VARCHAR(255) NULL,
+  bio TEXT NULL,
+  pronouns VARCHAR(80) NULL,
+  status VARCHAR(32) NULL,
+  username_set BOOLEAN NOT NULL DEFAULT FALSE,
+  allow_friend_requests BOOLEAN NOT NULL DEFAULT TRUE,
+  announcements_last_read_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  global_mentions_last_read_at DATETIME(3) NULL,
+  custom_status_text VARCHAR(140) NULL,
+  custom_status_emoji VARCHAR(32) NULL,
+  custom_status_set_at DATETIME(3) NULL,
+  custom_status_expires_at DATETIME(3) NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS user_roles (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  user_id CHAR(36) NOT NULL,
+  role ENUM('user','admin','super_admin') NOT NULL DEFAULT 'user',
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE KEY uq_user_roles_user_role (user_id, role),
+  KEY idx_user_roles_user (user_id),
+  CONSTRAINT fk_user_roles_profile FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS conversations (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  is_group BOOLEAN NOT NULL DEFAULT FALSE,
+  name VARCHAR(100) NULL,
+  created_by CHAR(36) NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  KEY idx_conversations_created_by (created_by),
+  CONSTRAINT fk_conversations_creator FOREIGN KEY (created_by) REFERENCES profiles(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS conversation_members (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  conversation_id CHAR(36) NOT NULL,
+  user_id CHAR(36) NOT NULL,
+  role VARCHAR(24) NOT NULL DEFAULT 'member',
+  joined_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE KEY uq_conversation_member (conversation_id, user_id),
+  KEY idx_conversation_members_user (user_id),
+  CONSTRAINT fk_conversation_members_conversation FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+  CONSTRAINT fk_conversation_members_profile FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS friend_requests (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  sender_id CHAR(36) NOT NULL,
+  receiver_id CHAR(36) NOT NULL,
+  status VARCHAR(24) NOT NULL DEFAULT 'pending',
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  UNIQUE KEY uq_friend_request_pair (sender_id, receiver_id),
+  KEY idx_friend_requests_receiver (receiver_id, status),
+  CONSTRAINT fk_friend_requests_sender FOREIGN KEY (sender_id) REFERENCES profiles(id) ON DELETE CASCADE,
+  CONSTRAINT fk_friend_requests_receiver FOREIGN KEY (receiver_id) REFERENCES profiles(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS messages (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  conversation_id CHAR(36) NOT NULL,
+  sender_id CHAR(36) NULL,
+  content LONGTEXT NOT NULL,
+  image_url TEXT NULL,
+  reply_to_id CHAR(36) NULL,
+  is_pinned BOOLEAN NOT NULL DEFAULT FALSE,
+  pinned_at DATETIME(3) NULL,
+  pinned_by CHAR(36) NULL,
+  read_at DATETIME(3) NULL,
+  delivered_at DATETIME(3) NULL,
+  edited_at DATETIME(3) NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  KEY idx_messages_conversation_created (conversation_id, created_at),
+  KEY idx_messages_sender (sender_id),
+  CONSTRAINT fk_messages_conversation FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+  CONSTRAINT fk_messages_sender FOREIGN KEY (sender_id) REFERENCES profiles(id) ON DELETE SET NULL,
+  CONSTRAINT fk_messages_reply FOREIGN KEY (reply_to_id) REFERENCES messages(id) ON DELETE SET NULL,
+  CONSTRAINT fk_messages_pinner FOREIGN KEY (pinned_by) REFERENCES profiles(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS global_messages (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  sender_id CHAR(36) NULL,
+  content LONGTEXT NOT NULL,
+  image_url TEXT NULL,
+  reply_to_id CHAR(36) NULL,
+  edited_at DATETIME(3) NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  KEY idx_global_messages_created (created_at),
+  CONSTRAINT fk_global_messages_sender FOREIGN KEY (sender_id) REFERENCES profiles(id) ON DELETE SET NULL,
+  CONSTRAINT fk_global_messages_reply FOREIGN KEY (reply_to_id) REFERENCES global_messages(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS announcement_messages (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  sender_id CHAR(36) NULL,
+  content LONGTEXT NOT NULL,
+  image_url TEXT NULL,
+  reply_to_id CHAR(36) NULL,
+  is_pinned BOOLEAN NOT NULL DEFAULT FALSE,
+  pinned_at DATETIME(3) NULL,
+  pinned_by CHAR(36) NULL,
+  edited_at DATETIME(3) NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  KEY idx_announcement_messages_created (created_at),
+  CONSTRAINT fk_announcement_sender FOREIGN KEY (sender_id) REFERENCES profiles(id) ON DELETE SET NULL,
+  CONSTRAINT fk_announcement_reply FOREIGN KEY (reply_to_id) REFERENCES announcement_messages(id) ON DELETE SET NULL,
+  CONSTRAINT fk_announcement_pinner FOREIGN KEY (pinned_by) REFERENCES profiles(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS message_reactions (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  message_id CHAR(36) NOT NULL,
+  user_id CHAR(36) NOT NULL,
+  emoji VARCHAR(32) NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE KEY uq_message_reaction (message_id, user_id, emoji),
+  KEY idx_message_reactions_user (user_id),
+  CONSTRAINT fk_reactions_message FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
+  CONSTRAINT fk_reactions_profile FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS blocked_users (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  blocker_id CHAR(36) NOT NULL,
+  blocked_id CHAR(36) NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE KEY uq_blocked_users_pair (blocker_id, blocked_id),
+  CONSTRAINT fk_blocker_profile FOREIGN KEY (blocker_id) REFERENCES profiles(id) ON DELETE CASCADE,
+  CONSTRAINT fk_blocked_profile FOREIGN KEY (blocked_id) REFERENCES profiles(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS pinned_conversations (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  user_id CHAR(36) NOT NULL,
+  conversation_id CHAR(36) NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE KEY uq_pinned_conversation (user_id, conversation_id),
+  CONSTRAINT fk_pinned_user FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE,
+  CONSTRAINT fk_pinned_conversation FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS polls (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  channel VARCHAR(32) NOT NULL,
+  conversation_id CHAR(36) NULL,
+  created_by CHAR(36) NOT NULL,
+  question TEXT NOT NULL,
+  multiple_choice BOOLEAN NOT NULL DEFAULT FALSE,
+  ends_at DATETIME(3) NOT NULL,
+  closed_at DATETIME(3) NULL,
+  message_id CHAR(36) NULL,
+  result_message_id CHAR(36) NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  KEY idx_polls_channel (channel, conversation_id, created_at),
+  CONSTRAINT fk_polls_creator FOREIGN KEY (created_by) REFERENCES profiles(id) ON DELETE CASCADE,
+  CONSTRAINT fk_polls_conversation FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS poll_options (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  poll_id CHAR(36) NOT NULL,
+  text VARCHAR(255) NOT NULL,
+  position INT NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_poll_options_order (poll_id, position),
+  CONSTRAINT fk_poll_options_poll FOREIGN KEY (poll_id) REFERENCES polls(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS poll_votes (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  poll_id CHAR(36) NOT NULL,
+  option_id CHAR(36) NOT NULL,
+  user_id CHAR(36) NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE KEY uq_poll_vote (poll_id, option_id, user_id),
+  KEY idx_poll_votes_user (poll_id, user_id),
+  CONSTRAINT fk_poll_votes_poll FOREIGN KEY (poll_id) REFERENCES polls(id) ON DELETE CASCADE,
+  CONSTRAINT fk_poll_votes_option FOREIGN KEY (option_id) REFERENCES poll_options(id) ON DELETE CASCADE,
+  CONSTRAINT fk_poll_votes_profile FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS admin_logs (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  admin_id CHAR(36) NOT NULL,
+  action VARCHAR(100) NOT NULL,
+  target_type VARCHAR(100) NOT NULL,
+  target_id CHAR(36) NULL,
+  details JSON NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_admin_logs_created (created_at),
+  KEY idx_admin_logs_admin (admin_id),
+  CONSTRAINT fk_admin_logs_admin FOREIGN KEY (admin_id) REFERENCES profiles(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS notification_preferences (
+  user_id CHAR(36) NOT NULL PRIMARY KEY,
+  ntfy_server VARCHAR(512) NOT NULL DEFAULT 'https://ntfy.sh',
+  ntfy_topic VARCHAR(255) NULL,
+  dm_mode VARCHAR(16) NOT NULL DEFAULT 'every',
+  dm_custom_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  dm_title_template VARCHAR(255) NOT NULL DEFAULT 'New message from {sender}',
+  dm_body_template TEXT NOT NULL DEFAULT '{message}',
+  global_mode VARCHAR(16) NOT NULL DEFAULT 'off',
+  global_custom_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  global_title_template VARCHAR(255) NOT NULL DEFAULT 'New message in global chat',
+  global_body_template TEXT NOT NULL DEFAULT '{sender}: {message}',
+  announcement_mode VARCHAR(16) NOT NULL DEFAULT 'every',
+  announcement_custom_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  announcement_title_template VARCHAR(255) NOT NULL DEFAULT 'New announcement',
+  announcement_body_template TEXT NOT NULL DEFAULT '{message}',
+  digest_cooldown_minutes INT NOT NULL DEFAULT 15,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  CONSTRAINT fk_notification_preferences_profile FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS notification_digest_state (
+  user_id CHAR(36) NOT NULL,
+  channel_key VARCHAR(64) NOT NULL,
+  last_notified_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (user_id, channel_key),
+  CONSTRAINT fk_notification_digest_profile FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS notification_trigger_events (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  channel VARCHAR(32) NOT NULL,
+  message_id CHAR(36) NOT NULL,
+  token VARCHAR(128) NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE KEY uq_notification_trigger (token),
+  KEY idx_notification_trigger_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS native_push_tokens (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  user_id CHAR(36) NOT NULL,
+  token TEXT NOT NULL,
+  platform VARCHAR(32) NOT NULL,
+  device_id VARCHAR(255) NULL,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  last_seen_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  KEY idx_native_push_tokens_user (user_id),
+  CONSTRAINT fk_native_push_profile FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

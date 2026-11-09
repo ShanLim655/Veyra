@@ -13,9 +13,9 @@ import NotFound from "./pages/NotFound";
 import ResetPassword from "./pages/ResetPassword";
 import AdminDashboard from "./pages/AdminDashboard";
 import ChatLayout from "./components/chat/ChatLayout";
+import { setPasswordRecoveryFlag } from "@/lib/passwordRecoveryFlag";
 
 const queryClient = new QueryClient();
-const PASSWORD_RECOVERY_FLAG = "chatt-password-recovery";
 
 const isPasswordRecoveryUrl = () => {
   const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
@@ -32,7 +32,7 @@ function PasswordRecoveryRedirect() {
 
   useEffect(() => {
     const routeToResetPassword = () => {
-      window.sessionStorage.setItem(PASSWORD_RECOVERY_FLAG, "true");
+      setPasswordRecoveryFlag();
 
       if (location.pathname !== "/reset-password") {
         navigate(`/reset-password${window.location.search}${window.location.hash}`, { replace: true });

@@ -23,12 +23,22 @@ const ThemeProviderContext = createContext<ThemeProviderState>(initialState);
 export function ThemeProvider({
   children,
   defaultTheme = "dark",
-  storageKey = "chatt-theme",
+  storageKey = "veyra-theme",
   ...props
 }: ThemeProviderProps) {
-  const [theme, setTheme] = useState<Theme>(
-    () => (localStorage.getItem(storageKey) as Theme) || defaultTheme
-  );
+  const [theme, setTheme] = useState<Theme>(() => {
+    const savedTheme = localStorage.getItem(storageKey);
+    if (savedTheme) return savedTheme as Theme;
+    if (storageKey === "veyra-theme") {
+      const legacyTheme = localStorage.getItem("chatt-theme");
+      if (legacyTheme) {
+        localStorage.setItem(storageKey, legacyTheme);
+        localStorage.removeItem("chatt-theme");
+        return legacyTheme as Theme;
+      }
+    }
+    return defaultTheme;
+  });
 
   useEffect(() => {
     const root = window.document.documentElement;
