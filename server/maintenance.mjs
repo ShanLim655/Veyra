@@ -1,5 +1,5 @@
-import { createClient } from '@supabase/supabase-js';
 import { pool } from './db.mjs';
+import { getSupabaseAdmin } from './supabase-admin.mjs';
 
 const tables = ['messages', 'global_messages', 'announcement_messages'];
 const buckets = new Set(['chat-images', 'chat-videos', 'chat-voice']);
@@ -33,10 +33,7 @@ function extractUrl(value) {
 }
 
 export async function purgeExpiredAttachments() {
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const supabaseUrl = process.env.SUPABASE_URL;
-  if (!serviceKey || !supabaseUrl) throw new Error('Supabase service-role credentials are required for Storage cleanup.');
-  const storage = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false } });
+  const storage = getSupabaseAdmin();
   const cutoffDate = new Date(Date.now() - 14 * 86400_000);
   const cutoff = cutoffDate.toISOString();
   const [adminRows] = await pool.query("SELECT user_id FROM user_roles WHERE role IN ('admin','super_admin')");

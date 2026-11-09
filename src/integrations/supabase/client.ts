@@ -1,6 +1,7 @@
 import type { Database } from './types';
 import { authClient } from './client-core';
 import { fromMariaDB, rpcMariaDB } from './data-api';
+import { subscribeMariaDbChanges, type ChangeFilter, type MariaDbChangeCallback } from './mariadb-realtime';
 
 async function sendNotificationTest() {
   try {
@@ -33,30 +34,44 @@ function mariaRealtimeChannel(name: string) {
   const originalOn = channel.on.bind(channel) as MutableChannel['on'];
   const originalSubscribe = channel.subscribe.bind(channel) as MutableChannel['subscribe'];
   const originalUnsubscribe = channel.unsubscribe.bind(channel);
-  const databaseListeners: Array<(payload: unknown) => void> = [];
-  let pollingTimer: ReturnType<typeof setInterval> | undefined;
+  const databaseListeners: Array<{ filter: unknown; callback: (payload: unknown) => void }> = [];
+  const databaseUnsubscribers: Array<() => void> = [];
+  let hasNativeListeners = false;
+  let nativeSubscribed = false;
 
   channel.on = (type: string, filter: unknown, callback: (payload: unknown) => void) => {
-    if (type === 'postgres_changes') databaseListeners.push(callback);
-    else originalOn(type, filter, callback);
+    if (type === 'postgres_changes') databaseListeners.push({ filter, callback });
+    else {
+      hasNativeListeners = true;
+      originalOn(type, filter, callback);
+    }
     return channel;
   };
   channel.subscribe = (callback?: (status: string) => void) => {
-    if (databaseListeners.length && !pollingTimer) {
-      pollingTimer = setInterval(() => {
-        for (const listener of databaseListeners) listener({ eventType: '*', new: {}, old: {} });
-      }, 5000);
+    if (databaseUnsubscribers.length || nativeSubscribed) return channel;
+    for (const listener of databaseListeners) {
+      databaseUnsubscribers.push(subscribeMariaDbChanges(
+        listener.filter as ChangeFilter,
+        listener.callback as MariaDbChangeCallback,
+      ));
     }
-    const result = originalSubscribe((status: string, error?: unknown) => {
-      callback?.(status);
-      if (error) console.warn('Supabase Realtime channel error', error);
-    });
-    return result as MutableChannel;
+    if (hasNativeListeners) {
+      nativeSubscribed = true;
+      return originalSubscribe((status: string, error?: unknown) => {
+        callback?.(status);
+        if (error) console.warn('Supabase Realtime channel error', error);
+      }) as MutableChannel;
+    }
+    callback?.('SUBSCRIBED');
+    return channel;
   };
   channel.unsubscribe = () => {
-    if (pollingTimer) clearInterval(pollingTimer);
-    pollingTimer = undefined;
-    return originalUnsubscribe() as Promise<string>;
+    databaseUnsubscribers.splice(0).forEach((unsubscribe) => unsubscribe());
+    if (nativeSubscribed) {
+      nativeSubscribed = false;
+      return originalUnsubscribe() as Promise<string>;
+    }
+    return Promise.resolve('ok');
   };
   return channel;
 }

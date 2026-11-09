@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 
@@ -13,11 +13,13 @@ export function usePresence(conversationId: string | null) {
   const { user } = useAuth();
   const [onlineUsers, setOnlineUsers] = useState<Set<string>>(new Set());
   const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
+  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   useEffect(() => {
     if (!user || !conversationId) return;
 
     const channel = supabase.channel(`presence:${conversationId}`);
+    channelRef.current = channel;
 
     channel
       .on("presence", { event: "sync" }, () => {
@@ -49,19 +51,20 @@ export function usePresence(conversationId: string | null) {
       });
 
     return () => {
+      if (channelRef.current === channel) channelRef.current = null;
       supabase.removeChannel(channel);
     };
   }, [user, conversationId]);
 
   const setTyping = useCallback(
     async (isTyping: boolean) => {
-      if (!user || !conversationId) return;
+      const channel = channelRef.current;
+      if (!user || !conversationId || !channel) return;
 
-      const channel = supabase.channel(`presence:${conversationId}`);
       await channel.track({
         user_id: user.id,
         online_at: new Date().toISOString(),
-        typing_in: isTyping ? conversationId : undefined,
+        typing_in: isTyping ? conversationId : null,
       });
     },
     [user, conversationId]

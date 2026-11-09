@@ -146,7 +146,6 @@ export default function Settings() {
   const uploadProfileImage = async (
     bucket: "avatars" | "banners",
     data: Blob | File,
-    ext: string,
     contentType: string,
     column: "avatar_url" | "banner_url"
   ) => {
@@ -154,23 +153,23 @@ export default function Settings() {
     if (exceedsMaxUploadSize(data)) {
       throw new Error(`Maximum file size is ${MAX_UPLOAD_SIZE_LABEL}.`);
     }
-    const fileName = `${user.id}/${bucket === "avatars" ? "avatar" : "banner"}.${ext}`;
-
-    // Delete any existing files in the user's folder (previous banner/avatar)
-    const { data: existing } = await supabase.storage.from(bucket).list(user.id);
-    if (existing && existing.length > 0) {
-      await supabase.storage
-        .from(bucket)
-        .remove(existing.map((f) => `${user.id}/${f.name}`));
+    const signResponse = await fetch('/api/storage/profile-upload', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bucket, contentType, size: data.size }),
+    });
+    const signedUpload = await signResponse.json() as { path?: string; token?: string; publicUrl?: string; error?: string };
+    if (!signResponse.ok || !signedUpload.path || !signedUpload.token || !signedUpload.publicUrl) {
+      throw new Error(signedUpload.error || 'Could not prepare the profile image upload.');
     }
 
     const { error: uploadError } = await supabase.storage
       .from(bucket)
-      .upload(fileName, data, { upsert: true, contentType });
+      .uploadToSignedUrl(signedUpload.path, signedUpload.token, data, { contentType, cacheControl: '3600' });
     if (uploadError) throw uploadError;
 
-    const { data: urlData } = supabase.storage.from(bucket).getPublicUrl(fileName);
-    const newUrl = urlData.publicUrl + `?t=${Date.now()}`;
+    const newUrl = signedUpload.publicUrl + `?t=${Date.now()}`;
 
     const { error: updateError } = await supabase
       .from("profiles")
@@ -217,7 +216,6 @@ export default function Settings() {
       const newUrl = await uploadProfileImage(
         "avatars",
         blob,
-        isGif ? "gif" : "jpg",
         isGif ? "image/gif" : "image/jpeg",
         "avatar_url"
       );
@@ -271,7 +269,6 @@ export default function Settings() {
       const newUrl = await uploadProfileImage(
         "banners",
         blob,
-        isGif ? "gif" : "jpg",
         isGif ? "image/gif" : "image/jpeg",
         "banner_url"
       );

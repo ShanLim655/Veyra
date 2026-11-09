@@ -2,6 +2,8 @@ import { supabase } from "@/integrations/supabase/client";
 
 const CHAT_BUCKETS = ["chat-images", "chat-videos", "chat-voice"];
 const DEFAULT_EXPIRES_IN_SECONDS = 60 * 60 * 6; // 6 hours
+const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
+const signingRequests = new Map<string, Promise<string>>();
 
 export interface FileMeta {
   url: string;
@@ -80,11 +82,26 @@ export async function signChatUrl(
 ): Promise<string> {
   const parsed = parseStorageUrl(url);
   if (!parsed) return url;
-  const { data, error } = await supabase.storage
-    .from(parsed.bucket)
-    .createSignedUrl(parsed.path, expiresIn);
-  if (error || !data?.signedUrl) return url;
-  return data.signedUrl;
+  const cached = signedUrlCache.get(url);
+  if (cached && cached.expiresAt > Date.now()) return cached.url;
+  const inFlight = signingRequests.get(url);
+  if (inFlight) return inFlight;
+
+  const request = (async () => {
+    const { data, error } = await supabase.storage
+      .from(parsed.bucket)
+      .createSignedUrl(parsed.path, expiresIn);
+    if (error || !data?.signedUrl) return url;
+    if (signedUrlCache.size >= 500) signedUrlCache.delete(signedUrlCache.keys().next().value!);
+    signedUrlCache.set(url, { url: data.signedUrl, expiresAt: Date.now() + expiresIn * 1000 - 60_000 });
+    return data.signedUrl;
+  })();
+  signingRequests.set(url, request);
+  try {
+    return await request;
+  } finally {
+    if (signingRequests.get(url) === request) signingRequests.delete(url);
+  }
 }
 
 export async function signMessageMedia(

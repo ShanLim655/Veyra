@@ -5,6 +5,11 @@ import { callRpc } from './rpc.mjs';
 import { sendTestNotification } from './notifications.mjs';
 import { purgeExpiredAttachments } from './maintenance.mjs';
 import { authenticateRequest, registerAuthRoutes } from './auth.mjs';
+import { changesFromRpc, changeFromDataRequest, mariaDbRealtimeTopic, publishMariaDbChanges } from './realtime.mjs';
+import { getSupabaseAdmin } from './supabase-admin.mjs';
+
+const MAX_PROFILE_IMAGE_BYTES = 25 * 1024 * 1024;
+const PROFILE_UPLOAD_TYPES = new Set(['image/jpeg', 'image/gif']);
 
 export function createApp() {
   const app = express();
@@ -35,14 +40,28 @@ export function createApp() {
     authenticateRequest(req, res, next);
   });
   app.post('/api/data', async (req, res) => {
-    try { res.json(await queryData(req.user.id, req.body)); }
+    try {
+      const result = await queryData(req.user.id, req.body);
+      const change = changeFromDataRequest(req.body, result);
+      if (change) await publishMariaDbChanges([change], req.user.id);
+      const response = { ...result };
+      delete response.realtimeRows;
+      res.json(response);
+    }
     catch (error) {
       const status = /not allowed|unknown table|unsupported/i.test(error.message) ? 403 : 400;
       res.status(status).json({ error: error.message || 'Database request failed.' });
     }
   });
   app.post('/api/rpc', async (req, res) => {
-    try { res.json({ data: await callRpc(req.user.id, req.body?.name, req.body?.args || {}) }); }
+    try {
+      const name = req.body?.name;
+      const args = req.body?.args || {};
+      const data = await callRpc(req.user.id, name, args);
+      const changes = changesFromRpc(name, args, data);
+      if (changes.length) await publishMariaDbChanges(changes, req.user.id);
+      res.json({ data });
+    }
     catch (error) {
       const status = /not allowed|admin access|unsupported|only the|must be|access required/i.test(error.message) ? 403 : 400;
       res.status(status).json({ error: error.message || 'Database action failed.' });
@@ -51,6 +70,29 @@ export function createApp() {
   app.post('/api/notifications/test', async (req, res) => {
     try { res.json(await sendTestNotification(req.user.id)); }
     catch (error) { res.status(400).json({ ok: false, error: error.message }); }
+  });
+  app.get('/api/realtime/topic', (req, res) => {
+    try { res.json({ topic: mariaDbRealtimeTopic(req.user.id) }); }
+    catch (error) { res.status(503).json({ error: error.message || 'Live updates are not configured.' }); }
+  });
+  app.post('/api/storage/profile-upload', async (req, res) => {
+    const { bucket, contentType, size } = req.body || {};
+    if (!['avatars', 'banners'].includes(bucket)) return res.status(400).json({ error: 'Unsupported profile image bucket.' });
+    if (!PROFILE_UPLOAD_TYPES.has(contentType)) return res.status(400).json({ error: 'Only JPEG and GIF profile images are supported.' });
+    if (!Number.isFinite(size) || size <= 0 || size > MAX_PROFILE_IMAGE_BYTES) {
+      return res.status(413).json({ error: 'Maximum file size is 25 MB.' });
+    }
+
+    try {
+      const path = `${req.user.id}/${bucket === 'avatars' ? 'avatar' : 'banner'}`;
+      const { data, error } = await getSupabaseAdmin().storage.from(bucket).createSignedUploadUrl(path, { upsert: true });
+      if (error || !data?.token) throw error || new Error('Could not create a secure upload link.');
+      const { data: publicData } = getSupabaseAdmin().storage.from(bucket).getPublicUrl(path);
+      res.json({ path, token: data.token, publicUrl: publicData.publicUrl });
+    } catch (error) {
+      console.error('Profile image upload link failed:', error);
+      res.status(503).json({ error: 'Profile image storage is not configured.' });
+    }
   });
   app.post('/api/maintenance/purge-expired-attachments', async (req, res) => {
     if (!req.cronAuthorized) {

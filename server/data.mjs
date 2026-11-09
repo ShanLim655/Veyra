@@ -16,7 +16,7 @@ async function columnsFor(table) {
   if (!TABLES.has(table)) throw new Error('Unknown table.');
   if (!columnCache.has(table)) {
     const [rows] = await pool.query(`SHOW COLUMNS FROM \`${table}\``);
-    columnCache.set(table, new Set(rows.map((row) => row.Field)));
+    columnCache.set(table, new Map(rows.map((row) => [row.Field, row.Type])));
   }
   return columnCache.get(table);
 }
@@ -26,6 +26,24 @@ function identifier(value, columns) {
     throw new Error(`Unsupported column: ${value}`);
   }
   return `\`${value}\``;
+}
+
+function normalizeTemporalValue(value, columnType) {
+  if (value == null || typeof value !== 'string' || !/^(?:date|datetime|timestamp)\b/i.test(columnType || '')) return value;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) return value;
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) throw new Error('Invalid date or time value.');
+  const iso = parsed.toISOString();
+  if (/^date\b/i.test(columnType) && !/^datetime\b/i.test(columnType)) return iso.slice(0, 10);
+  return `${iso.slice(0, 10)} ${iso.slice(11, 23)}`;
+}
+
+function normalizeRowTemporalValues(row, columns) {
+  return Object.fromEntries(Object.entries(row).map(([key, value]) => [
+    key,
+    normalizeTemporalValue(value, columns.get(key)),
+  ]));
 }
 
 async function isAdmin(userId) {
@@ -128,18 +146,24 @@ function filterSql(filters, columns) {
   for (const filter of filters || []) {
     const col = identifier(filter.column, columns);
     switch (filter.op) {
-      case 'eq': parts.push(`${col} = ?`); args.push(filter.value); break;
-      case 'neq': parts.push(`${col} <> ?`); args.push(filter.value); break;
-      case 'gt': parts.push(`${col} > ?`); args.push(filter.value); break;
-      case 'gte': parts.push(`${col} >= ?`); args.push(filter.value); break;
-      case 'lt': parts.push(`${col} < ?`); args.push(filter.value); break;
-      case 'lte': parts.push(`${col} <= ?`); args.push(filter.value); break;
+      case 'eq': parts.push(`${col} = ?`); args.push(normalizeTemporalValue(filter.value, columns.get(filter.column))); break;
+      case 'neq': parts.push(`${col} <> ?`); args.push(normalizeTemporalValue(filter.value, columns.get(filter.column))); break;
+      case 'gt': parts.push(`${col} > ?`); args.push(normalizeTemporalValue(filter.value, columns.get(filter.column))); break;
+      case 'gte': parts.push(`${col} >= ?`); args.push(normalizeTemporalValue(filter.value, columns.get(filter.column))); break;
+      case 'lt': parts.push(`${col} < ?`); args.push(normalizeTemporalValue(filter.value, columns.get(filter.column))); break;
+      case 'lte': parts.push(`${col} <= ?`); args.push(normalizeTemporalValue(filter.value, columns.get(filter.column))); break;
       case 'in': {
         if (!Array.isArray(filter.value) || !filter.value.length) parts.push('1 = 0');
-        else { parts.push(`${col} IN (${filter.value.map(() => '?').join(',')})`); args.push(...filter.value); }
+        else {
+          parts.push(`${col} IN (${filter.value.map(() => '?').join(',')})`);
+          args.push(...filter.value.map((value) => normalizeTemporalValue(value, columns.get(filter.column))));
+        }
         break;
       }
-      case 'is': parts.push(filter.value === null ? `${col} IS NULL` : `${col} IS ?`); if (filter.value !== null) args.push(filter.value); break;
+      case 'is':
+        parts.push(filter.value === null ? `${col} IS NULL` : `${col} IS ?`);
+        if (filter.value !== null) args.push(normalizeTemporalValue(filter.value, columns.get(filter.column)));
+        break;
       case 'ilike': parts.push(`LOWER(${col}) LIKE LOWER(?)`); args.push(String(filter.value).replaceAll('*', '%')); break;
       default: throw new Error(`Unsupported filter: ${filter.op}`);
     }
@@ -158,7 +182,7 @@ function parseOr(raw, columns) {
     const op = match[2];
     const value = match[3];
     if (op === 'ilike') { args.push(value.replaceAll('*', '%')); return `LOWER(${col}) LIKE LOWER(?)`; }
-    args.push(value);
+    args.push(normalizeTemporalValue(value, columns.get(match[1])));
     return `${col} ${op === 'eq' ? '=' : '<>'} ?`;
   });
   return { sql: `(${sql.join(' OR ')})`, args };
@@ -214,13 +238,14 @@ export async function queryData(userId, payload) {
         if (!polls.length) throw new Error('This poll is closed.');
         if (!polls[0].multiple_choice) await pool.execute('DELETE FROM poll_votes WHERE poll_id = ? AND user_id = ? AND option_id <> ?', [row.poll_id, row.user_id, row.option_id]);
       }
-      const keys = Object.keys(row);
+      const normalizedRow = normalizeRowTemporalValues(row, columns);
+      const keys = Object.keys(normalizedRow);
       for (const key of keys) identifier(key, columns);
       if (!keys.length) throw new Error('Insert data is empty.');
       const updateKeys = operation === 'upsert' ? keys.filter((key) => key !== 'id' && key !== 'user_id') : [];
       const [result] = await pool.execute(
         `INSERT INTO \`${table}\` (${keys.map((key) => `\`${key}\``).join(', ')}) VALUES (${keys.map(() => '?').join(', ')})${operation === 'upsert' && updateKeys.length ? ` ON DUPLICATE KEY UPDATE ${updateKeys.map((key) => `\`${key}\` = VALUES(\`${key}\`)`).join(', ')}` : ''}`,
-        keys.map((key) => row[key]),
+        keys.map((key) => normalizedRow[key]),
       );
       inserted.push(row.id ?? row.user_id ?? result.insertId);
     }
@@ -234,7 +259,7 @@ export async function queryData(userId, payload) {
   }
 
   if (operation === 'update') {
-    const patch = payload.values || {};
+    const patch = normalizeRowTemporalValues(payload.values || {}, columns);
     const keys = Object.keys(patch);
     for (const key of keys) identifier(key, columns);
     if (!keys.length) return { data: [], count: 0 };
@@ -260,12 +285,14 @@ export async function queryData(userId, payload) {
   }
 
   if (operation === 'delete') {
-    const [rows] = await pool.execute(`SELECT id FROM \`${table}\` t WHERE ${whereSql}`, whereArgs);
+    const realtimeColumns = ['id', 'user_id', 'conversation_id', 'message_id', 'poll_id', 'option_id', 'sender_id', 'receiver_id', 'blocker_id', 'blocked_id', 'group_id']
+      .filter((column) => columns.has(column));
+    const [rows] = await pool.execute(`SELECT ${realtimeColumns.map((column) => `t.\`${column}\``).join(', ')} FROM \`${table}\` t WHERE ${whereSql}`, whereArgs);
     if (!rows.length) return { data: payload.returning ? [] : null, count: 0 };
     const ids = rows.map((row) => row.id);
     const before = payload.returning ? await fetchByIds(table, ids, requested, columns) : null;
     await pool.execute(`DELETE FROM \`${table}\` WHERE id IN (${ids.map(() => '?').join(',')})`, ids);
-    return { data: before, count: ids.length };
+    return { data: before, count: ids.length, realtimeRows: rows };
   }
 }
 

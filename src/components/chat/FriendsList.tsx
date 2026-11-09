@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { useUserRole } from "@/hooks/useUserRole";
@@ -88,6 +88,7 @@ export function FriendsList({ onSelectConversation, selectedConversationId }: Fr
   const [friendRequests, setFriendRequests] = useState<FriendRequest[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [groups, setGroups] = useState<GroupEntry[]>([]);
+  const sidebarRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [searchUsername, setSearchUsername] = useState("");
   const [loading, setLoading] = useState(false);
   const [showUnfriendDialog, setShowUnfriendDialog] = useState<Conversation | null>(null);
@@ -373,14 +374,30 @@ export function FriendsList({ onSelectConversation, selectedConversationId }: Fr
           schema: "public",
           table: "messages",
         },
-        () => {
-          fetchConversations();
-          fetchGroups();
+        (payload) => {
+          const change = payload as unknown as {
+            refresh?: boolean;
+            eventType?: string;
+            actor_id?: string;
+            columns?: string[];
+          };
+          if (change.refresh && change.eventType === 'UPDATE') {
+            if (!change.columns?.includes('read_at') || change.actor_id !== user.id) return;
+          }
+          if (!sidebarRefreshTimerRef.current) {
+            sidebarRefreshTimerRef.current = setTimeout(() => {
+              sidebarRefreshTimerRef.current = null;
+              fetchConversations();
+              fetchGroups();
+            }, 100);
+          }
         }
       )
       .subscribe();
 
     return () => {
+      if (sidebarRefreshTimerRef.current) clearTimeout(sidebarRefreshTimerRef.current);
+      sidebarRefreshTimerRef.current = null;
       supabase.removeChannel(channel);
     };
   }, [user]);

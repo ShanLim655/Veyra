@@ -15,7 +15,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Smile, Loader2, Trash2 } from "lucide-react";
-import { FullEmojiPicker } from "@/components/chat/FullEmojiPicker";
+import { LazyFullEmojiPicker } from "@/components/chat/LazyFullEmojiPicker";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/useAuth";
@@ -144,7 +144,7 @@ export function CustomStatusEditor({ initial, onClose, onSaved }: Props) {
             </Button>
           </PopoverTrigger>
           <PopoverContent className="w-auto p-0" align="start">
-            <FullEmojiPicker
+            <LazyFullEmojiPicker
               onSelect={(e) => {
                 setEmoji(e);
                 setEmojiOpen(false);

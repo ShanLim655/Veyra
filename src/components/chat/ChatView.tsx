@@ -60,10 +60,10 @@ import { MessageMusicPlayer } from "@/components/chat/MessageMusicPlayer";
 import { FileText, Music, Paperclip } from "lucide-react";
 import { UserProfileDialog } from "@/components/profile/UserProfileDialog";
 import { markAnnouncementsRead } from "@/lib/announcements";
-import { FullEmojiPicker } from "@/components/chat/FullEmojiPicker";
 import { SmilePlus } from "lucide-react";
 import { ChatSearch } from "@/components/chat/ChatSearch";
 import { messageMentionsMe } from "@/lib/mentions";
+import { LazyFullEmojiPicker as EmojiPickerPanel } from "@/components/chat/LazyFullEmojiPicker";
 import { MentionAutocomplete, type MentionCandidate } from "@/components/chat/MentionAutocomplete";
 import { PollCard, PollResultCard } from "@/components/chat/PollCard";
 import { CreatePollDialog } from "@/components/chat/CreatePollDialog";
@@ -75,7 +75,6 @@ import { GroupSettingsDialog } from "@/components/chat/GroupSettingsDialog";
 
 
 const EXPIRED_ATTACHMENT_IMG = "/expired-attachment.png";
-
 interface Reaction {
   id: string;
   emoji: string;
@@ -123,6 +122,15 @@ interface Profile {
   custom_status_emoji?: string | null;
   custom_status_expires_at?: string | null;
 }
+
+type MariaDbRefreshPayload = {
+  refresh?: boolean;
+  table?: string;
+  eventType?: string;
+  actor_id?: string;
+  keys?: Record<string, string | number>;
+  columns?: string[];
+};
 
 type AttachmentKind = 'image' | 'video' | 'music' | 'file';
 
@@ -337,6 +345,8 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingReadMessages = useRef<Set<string>>(new Set());
   const messageRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const realtimeRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const receiptRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const swipeStateRef = useRef<{ messageId: string; startX: number; active: boolean } | null>(null);
 
   const scrollToMessage = useCallback((messageId: string) => {
@@ -483,6 +493,28 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     return reactionsMap;
   }, []);
 
+  const refreshReceiptStatuses = useCallback(async () => {
+    if (!showReceipts || messagesTable !== 'messages') return;
+    const messageIds = messagesRef.current.map((message) => message.id);
+    if (!messageIds.length) return;
+    const { data } = await supabase
+      .from('messages')
+      .select('id, read_at, delivered_at')
+      .in('id', messageIds);
+    if (!data) return;
+    const receipts = new Map(data.map((message: any) => [message.id, message]));
+    setMessages((previous) => previous.map((message) => {
+      const receipt = receipts.get(message.id) as { read_at: string | null; delivered_at: string | null } | undefined;
+      if (!receipt) return message;
+      return {
+        ...message,
+        read_at: receipt.read_at,
+        delivered_at: receipt.delivered_at,
+        _status: receipt.read_at ? 'read' : receipt.delivered_at ? 'delivered' : 'sent',
+      };
+    }));
+  }, [messagesTable, showReceipts]);
+
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
@@ -502,6 +534,39 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
           "postgres_changes",
           subFilter as any,
           async (payload) => {
+            const change = payload as unknown as MariaDbRefreshPayload;
+            if (change.refresh) {
+              if (change.eventType === 'DELETE' && change.keys?.id) {
+                setMessages((previous) => previous.filter((message) => message.id !== change.keys.id));
+                return;
+              }
+
+              if (change.keys?.id && change.eventType !== 'INSERT'
+                && !messagesRef.current.some((message) => message.id === change.keys.id)) return;
+
+              const columns = change.columns as string[] | undefined;
+              const receiptOnly = change.table === 'messages'
+                && change.eventType === 'UPDATE'
+                && columns?.length
+                && columns.every((column) => column === 'read_at' || column === 'delivered_at');
+              if (receiptOnly) {
+                if (!receiptRefreshTimerRef.current) {
+                  receiptRefreshTimerRef.current = setTimeout(() => {
+                    receiptRefreshTimerRef.current = null;
+                    void refreshReceiptStatuses();
+                  }, 100);
+                }
+                return;
+              }
+
+              if (!realtimeRefreshTimerRef.current) {
+                realtimeRefreshTimerRef.current = setTimeout(() => {
+                  realtimeRefreshTimerRef.current = null;
+                  void fetchMessagesRef.current?.();
+                }, 60);
+              }
+              return;
+            }
             if (payload.eventType === "INSERT") {
               const newMsg = payload.new as Message;
               if (newMsg.sender_id) {
@@ -609,6 +674,17 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
             table: "message_reactions",
           },
           (payload) => {
+            const change = payload as unknown as MariaDbRefreshPayload;
+            if (change.refresh) {
+              const messageIds = messagesRef.current.map((message) => message.id);
+              void fetchReactions(messageIds).then((reactionMap) => {
+                setMessages((previous) => previous.map((message) => ({
+                  ...message,
+                  reactions: reactionMap[message.id] || [],
+                })));
+              });
+              return;
+            }
             if (payload.eventType === "INSERT") {
               const newReaction = payload.new as Reaction;
               setMessages((prev) =>
@@ -639,6 +715,10 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
         .subscribe();
 
       return () => {
+        if (realtimeRefreshTimerRef.current) clearTimeout(realtimeRefreshTimerRef.current);
+        if (receiptRefreshTimerRef.current) clearTimeout(receiptRefreshTimerRef.current);
+        realtimeRefreshTimerRef.current = null;
+        receiptRefreshTimerRef.current = null;
         supabase.removeChannel(channel);
         supabase.removeChannel(reactionsChannel);
       };
@@ -958,28 +1038,30 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     setHasMore((data || []).length === MESSAGES_PER_PAGE);
 
     const messageIds = (data || []).map((m: any) => m.id);
-    const reactionsMap = await fetchReactions(messageIds);
-
-    // Fetch sender profiles in batch
     const senderIds = [...new Set((data || []).map((m: any) => m.sender_id).filter(Boolean))] as string[];
-    const { data: profiles } = senderIds.length > 0 
-      ? await supabase
+    const replyToIds = [...new Set((data || []).map((m: any) => m.reply_to_id).filter(Boolean))] as string[];
+
+    // These reads are independent; issue them together instead of making each
+    // chat load wait through multiple database round trips in sequence.
+    const [reactionsMap, profileResult, repliedResult] = await Promise.all([
+      fetchReactions(messageIds),
+      senderIds.length > 0
+        ? supabase
           .from("profiles")
           .select("id, username, display_name, avatar_url")
           .in("id", senderIds)
-      : { data: [] };
-    
-    const profilesMap = new Map((profiles || []).map((p) => [p.id, p]));
-
-    // Fetch replied messages
-    const replyToIds = [...new Set((data || []).map((m: any) => m.reply_to_id).filter(Boolean))] as string[];
-    const { data: repliedMessages } = replyToIds.length > 0
-      ? await (supabase as any)
+        : Promise.resolve({ data: [] }),
+      replyToIds.length > 0
+        ? (supabase as any)
           .from(messagesTable)
           .select("id, content, sender_id")
           .in("id", replyToIds)
-      : { data: [] };
-    
+        : Promise.resolve({ data: [] }),
+    ]);
+    const profiles = profileResult.data;
+    const profilesMap = new Map((profiles || []).map((p) => [p.id, p]));
+    const repliedMessages = repliedResult.data;
+
     // Fetch sender profiles for replied messages
     const replySenderIds = [...new Set(((repliedMessages || []) as any[]).map((m: any) => m.sender_id).filter(Boolean))] as string[];
     const { data: replyProfiles } = replySenderIds.length > 0
@@ -2280,7 +2362,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                                 </button>
                               </PopoverTrigger>
                               <PopoverContent className="w-auto p-0 border-none" side="top">
-                                <FullEmojiPicker
+                                <EmojiPickerPanel
                                   onSelect={(emoji) => {
                                     toggleReaction(message.id, emoji);
                                     setOpenEmojiPopover(null);
@@ -2317,7 +2399,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                             </Button>
                           </PopoverTrigger>
                           <PopoverContent className="w-auto p-0 border-none" side="top">
-                            <FullEmojiPicker
+                            <EmojiPickerPanel
                               onSelect={(emoji) => {
                                 toggleReaction(message.id, emoji);
                                 setOpenEmojiPopover(null);
@@ -2855,7 +2937,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                       </button>
                     </PopoverTrigger>
                     <PopoverContent className="w-auto p-0 border-none" side="top">
-                      <FullEmojiPicker
+                      <EmojiPickerPanel
                         onSelect={(emoji) => {
                           toggleReaction(m.id, emoji);
                           setOpenEmojiPopover(null);

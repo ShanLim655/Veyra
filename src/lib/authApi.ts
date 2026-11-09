@@ -6,6 +6,9 @@ export type VeyraUser = {
   user_metadata: { username: string; display_name: string };
 };
 
+let authChangeVersion = 0;
+export function getAuthChangeVersion() { return authChangeVersion; }
+
 export async function authRequest<T = { ok: boolean; message?: string }>(path: string, body?: Record<string, unknown>): Promise<T> {
   const response = await fetch(`/api/auth/${path}`, {
     method: body ? "POST" : "GET",
@@ -30,6 +33,8 @@ export async function authRequest<T = { ok: boolean; message?: string }>(path: s
   return result as T;
 }
 
-export function notifyAuthChanged() {
-  window.dispatchEvent(new Event("veyra-auth-changed"));
+export function notifyAuthChanged(user?: VeyraUser | null) {
+  authChangeVersion++;
+  const detail = user === undefined ? {} : { resolved: true, user };
+  window.dispatchEvent(new CustomEvent("veyra-auth-changed", { detail }));
 }
