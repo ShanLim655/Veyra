@@ -75,6 +75,14 @@ import { GroupSettingsDialog } from "@/components/chat/GroupSettingsDialog";
 
 
 const EXPIRED_ATTACHMENT_IMG = "/expired-attachment.png";
+async function uploadChatMedia(bucket: "chat-images" | "chat-videos" | "chat-voice", path: string, file: Blob) {
+  const response = await fetch("/api/storage/chat-upload", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bucket, path, contentType: file.type || "application/octet-stream", size: file.size }) });
+  const signed = await response.json() as { path?: string; token?: string; publicUrl?: string; error?: string };
+  if (!response.ok || !signed.path || !signed.token || !signed.publicUrl) throw new Error(signed.error || "Could not prepare the media upload.");
+  const { error } = await supabase.storage.from(bucket).uploadToSignedUrl(signed.path, signed.token, file, { contentType: file.type || "application/octet-stream", cacheControl: "31536000, immutable" });
+  if (error) throw error;
+  return signed.publicUrl;
+}
 interface Reaction {
   id: string;
   emoji: string;
@@ -440,20 +448,12 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       const folder = isDM ? conversationIdProp : channel;
       const fileName = `${user.id}/${folder}/${Date.now()}-${Math.random().toString(36).slice(2)}.${extension}`;
       
-      const { error: uploadError } = await supabase.storage
-        .from("chat-voice")
-        .upload(fileName, blob, { cacheControl: "31536000, immutable" });
-      
-      if (uploadError) throw uploadError;
-      
-      const { data: urlData } = supabase.storage
-        .from("chat-voice")
-        .getPublicUrl(fileName);
+      const publicUrl = await uploadChatMedia("chat-voice", fileName, blob);
       
       const insertPayload: any = {
         sender_id: user.id,
         content: "",
-        image_url: JSON.stringify([`audio:${urlData.publicUrl}:${Math.round(duration)}`]),
+        image_url: JSON.stringify([`audio:${publicUrl}:${Math.round(duration)}`]),
       };
       if (isDM) insertPayload.conversation_id = conversationIdProp;
       await (supabase as any).from(messagesTable).insert(insertPayload);
@@ -1234,16 +1234,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
           const fileName = `${user.id}/${folder}/${Date.now()}-${Math.random().toString(36).slice(2)}.${fileExt}`;
           const bucket = preview.type === "video" ? "chat-videos" : "chat-images";
 
-          const { error: uploadError } = await supabase.storage
-            .from(bucket)
-            .upload(fileName, fileToUpload, {
-              contentType: fileToUpload.type || undefined,
-              cacheControl: "31536000, immutable",
-            });
-          if (uploadError) throw uploadError;
-
-          const { data: urlData } = supabase.storage.from(bucket).getPublicUrl(fileName);
-          const publicUrl = urlData.publicUrl;
+          const publicUrl = await uploadChatMedia(bucket, fileName, fileToUpload);
           if (preview.type === "video") {
             urls.push(`video:${publicUrl}`);
           } else if (preview.type === "image") {
