@@ -10,6 +10,8 @@ import { getSupabaseAdmin } from './supabase-admin.mjs';
 
 const MAX_PROFILE_IMAGE_BYTES = 25 * 1024 * 1024;
 const PROFILE_UPLOAD_TYPES = new Set(['image/jpeg', 'image/gif']);
+const CHAT_UPLOAD_BUCKETS = new Set(['chat-images', 'chat-videos', 'chat-voice']);
+const MAX_CHAT_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 export function createApp() {
   const app = express();
@@ -92,6 +94,25 @@ export function createApp() {
     } catch (error) {
       console.error('Profile image upload link failed:', error);
       res.status(503).json({ error: 'Profile image storage is not configured.' });
+    }
+  });
+  app.post('/api/storage/chat-upload', async (req, res) => {
+    const { bucket, path, contentType, size } = req.body || {};
+    if (!CHAT_UPLOAD_BUCKETS.has(bucket) || typeof path !== 'string' || path.length > 512
+      || path.split('/')[0] !== req.user.id || path.split('/').some((part) => !part || part === '.' || part === '..')) {
+      return res.status(400).json({ error: 'Invalid chat upload path.' });
+    }
+    if (!Number.isFinite(size) || size <= 0 || size > MAX_CHAT_UPLOAD_BYTES) {
+      return res.status(413).json({ error: 'Maximum file size is 25 MB.' });
+    }
+    try {
+      const { data, error } = await getSupabaseAdmin().storage.from(bucket).createSignedUploadUrl(path);
+      if (error || !data?.token) throw error || new Error('Could not create upload link.');
+      const { data: publicData } = getSupabaseAdmin().storage.from(bucket).getPublicUrl(path);
+      res.json({ path, token: data.token, publicUrl: publicData.publicUrl, contentType });
+    } catch (error) {
+      console.error('Chat media upload link failed:', error);
+      res.status(503).json({ error: 'Chat media storage is not configured.' });
     }
   });
   app.post('/api/maintenance/purge-expired-attachments', async (req, res) => {
