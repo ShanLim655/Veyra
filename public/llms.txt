@@ -1,0 +1,8 @@
+# Chatt
+
+> Chatt is a real-time messaging app for chatting with friends one-on-one or in private group chats, with reactions, replies, polls, voice notes, file attachments, and @mentions.
+
+## Pages
+
+- [Home](/): Landing page and app entry point.
+- [Sign in](/auth): Sign in or create a Chatt account.

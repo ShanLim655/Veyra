@@ -1,0 +1,1 @@
+DROP POLICY IF EXISTS "Users can add members to conversations they're in" ON public.conversation_members;

@@ -1,0 +1,2 @@
+ALTER TABLE public.notification_preferences ALTER COLUMN ntfy_server SET DEFAULT 'https://ntfy.chat-amani.xyz';
+UPDATE public.notification_preferences SET ntfy_server = 'https://ntfy.chat-amani.xyz' WHERE ntfy_server IN ('https://nfty-production.up.railway.app', 'https://ntfy.sh') OR ntfy_server IS NULL;

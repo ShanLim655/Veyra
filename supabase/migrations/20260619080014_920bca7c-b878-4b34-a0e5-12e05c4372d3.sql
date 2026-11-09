@@ -1,0 +1,2 @@
+CREATE POLICY "Avatars are publicly viewable" ON storage.objects FOR SELECT TO public USING (bucket_id = 'avatars');
+CREATE POLICY "Banners are publicly viewable" ON storage.objects FOR SELECT TO public USING (bucket_id = 'banners');

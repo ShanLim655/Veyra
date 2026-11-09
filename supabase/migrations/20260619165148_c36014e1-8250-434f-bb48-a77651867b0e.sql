@@ -1,0 +1,1 @@
+ALTER TABLE public.poll_votes REPLICA IDENTITY FULL;

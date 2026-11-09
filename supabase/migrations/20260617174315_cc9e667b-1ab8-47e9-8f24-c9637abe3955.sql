@@ -1,0 +1,2 @@
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS announcements_last_read_at timestamptz NOT NULL DEFAULT now();
+UPDATE public.profiles SET announcements_last_read_at = now() WHERE announcements_last_read_at IS NULL;
