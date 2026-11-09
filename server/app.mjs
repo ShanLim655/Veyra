@@ -11,6 +11,16 @@ export function createApp() {
   if (!process.env.MARIADB_USER || !process.env.MARIADB_DATABASE) throw new Error('MARIADB_USER and MARIADB_DATABASE are required.');
   app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb' }));
+  app.use((req, _res, next) => {
+    const requestUrl = new URL(req.url || '/', 'http://veyra.local');
+    const apiPath = requestUrl.searchParams.get('apiPath') || requestUrl.searchParams.get('__api_path');
+    if (apiPath) {
+      requestUrl.searchParams.delete('apiPath');
+      requestUrl.searchParams.delete('__api_path');
+      req.url = `/api/${apiPath.replace(/^\/+/, '')}${requestUrl.search}`;
+    }
+    next();
+  });
   registerAuthRoutes(app);
   app.get('/api/health', async (_req, res) => {
     try { await pool.query('SELECT 1'); res.json({ ok: true, database: 'connected' }); }
