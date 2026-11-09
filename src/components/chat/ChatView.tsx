@@ -53,6 +53,7 @@ import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { signMessageMedia, encodeFile, decodeFile, encodeMusic, decodeMusic } from "@/lib/mediaUrl";
 import { compressImageForUpload } from "@/lib/imageCompress";
 import { getCachedMessages, setCachedMessages } from "@/lib/chatCache";
+import { exceedsMaxUploadSize, MAX_UPLOAD_SIZE_LABEL } from "@/lib/uploadLimits";
 import { MessageFileCard } from "@/components/chat/MessageFileCard";
 import { ChatImage } from "@/components/chat/ChatImage";
 import { MessageMusicPlayer } from "@/components/chat/MessageMusicPlayer";
@@ -130,8 +131,6 @@ interface MediaPreview {
   url: string;
   type: AttachmentKind;
 }
-
-const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10MB
 
 function classifyFile(file: File): AttachmentKind {
   if (file.type.startsWith('image/')) return 'image';
@@ -416,6 +415,14 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   const handleVoiceRecordingComplete = useCallback(async (blob: Blob, duration: number) => {
     if (!user || !conversationId) return;
     if (!canPost) return;
+    if (exceedsMaxUploadSize(blob)) {
+      toast({
+        title: "Voice message is too large",
+        description: `Maximum file size is ${MAX_UPLOAD_SIZE_LABEL}.`,
+        variant: "destructive",
+      });
+      return;
+    }
     
     setUploadingVoice(true);
     try {
@@ -1249,10 +1256,10 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
         });
         continue;
       }
-      if (file.size > MAX_ATTACHMENT_BYTES) {
+      if (exceedsMaxUploadSize(file)) {
         toast({
           title: `${file.name} is too large`,
-          description: "Maximum file size is 10MB.",
+          description: `Maximum file size is ${MAX_UPLOAD_SIZE_LABEL}.`,
           variant: "destructive",
         });
         continue;
@@ -1592,7 +1599,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
           <div className="text-center">
             <Paperclip className="h-10 w-10 mx-auto mb-2 text-primary" />
             <p className="text-sm font-medium">Drop files to attach</p>
-            <p className="text-xs text-muted-foreground">Up to 10MB each</p>
+            <p className="text-xs text-muted-foreground">Up to {MAX_UPLOAD_SIZE_LABEL} each</p>
           </div>
         </div>
       )}

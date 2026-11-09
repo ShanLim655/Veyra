@@ -9,6 +9,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "@/hooks/use-toast";
+import { exceedsMaxUploadSize, MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_LABEL } from "@/lib/uploadLimits";
 import { ArrowLeft, Camera, Sun, Moon, Monitor, LogOut, User, Bell, Palette, Shield, Image as ImageIcon } from "lucide-react";
 import NotificationSettings from "@/components/settings/NotificationSettings";
 import PasswordSettings from "@/components/settings/PasswordSettings";
@@ -154,6 +155,9 @@ export default function Settings() {
     column: "avatar_url" | "banner_url"
   ) => {
     if (!user) return null;
+    if (exceedsMaxUploadSize(data)) {
+      throw new Error(`Maximum file size is ${MAX_UPLOAD_SIZE_LABEL}.`);
+    }
     const fileName = `${user.id}/${bucket === "avatars" ? "avatar" : "banner"}.${ext}`;
 
     // Delete any existing files in the user's folder (previous banner/avatar)
@@ -200,8 +204,8 @@ export default function Settings() {
       return;
     }
 
-    if (file.size > 15 * 1024 * 1024) {
-      toast({ title: "Image must be less than 15MB", variant: "destructive" });
+    if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+      toast({ title: `Image must be ${MAX_UPLOAD_SIZE_LABEL} or smaller`, variant: "destructive" });
       return;
     }
 
@@ -254,8 +258,8 @@ export default function Settings() {
       return;
     }
 
-    if (file.size > 15 * 1024 * 1024) {
-      toast({ title: "Image must be less than 15MB", variant: "destructive" });
+    if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+      toast({ title: `Image must be ${MAX_UPLOAD_SIZE_LABEL} or smaller`, variant: "destructive" });
       return;
     }
 
@@ -445,7 +449,7 @@ export default function Settings() {
                   </div>
                   <div className="text-sm text-muted-foreground">
                     <p>You'll be able to crop and zoom before saving</p>
-                    <p>Max file size: 15MB</p>
+                    <p>Max file size: {MAX_UPLOAD_SIZE_LABEL}</p>
                     {avatarRemaining > 0 ? (
                       <p className="text-amber-500 mt-1">
                         Available again in {formatRemaining(avatarRemaining)}
@@ -496,7 +500,7 @@ export default function Settings() {
                 </div>
                 <div className="text-sm text-muted-foreground mt-3">
                   <p>Recommended ratio 2:1. You'll be able to crop and zoom (GIFs stay animated).</p>
-                  <p>Max file size: 15MB</p>
+                  <p>Max file size: {MAX_UPLOAD_SIZE_LABEL}</p>
                   {bannerRemaining > 0 ? (
                     <p className="text-amber-500 mt-1">
                       Available again in {formatRemaining(bannerRemaining)}
