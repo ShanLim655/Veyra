@@ -40,7 +40,22 @@ export default function Auth() {
   useEffect(() => {
     const url = new URL(window.location.href);
     const token = url.searchParams.get("token");
-    if (!token) return;
+    const oauthError = url.searchParams.get("error");
+    const oauthMessages: Record<string, string> = {
+      google_not_configured: "Google sign-in needs GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET on the API server.",
+      google_access_denied: "Google sign-in was cancelled.",
+      google_state_invalid: "The Google sign-in session expired. Please try again.",
+      google_email_not_supported: "Use a Gmail or Google Workspace address to sign in with Google.",
+      google_auth_failed: "Google could not sign you in. Please try again.",
+    };
+    if (oauthError) {
+      toast({ title: "Google sign-in failed", description: oauthMessages[oauthError] || "Google could not sign you in. Please try again.", variant: "destructive" });
+      url.searchParams.delete("error");
+    }
+    if (!token) {
+      if (oauthError) window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+      return;
+    }
     authRequest("verify", { token })
       .then(() => toast({ title: "Email confirmed", description: "Your account is ready. Sign in to continue." }))
       .catch((error: unknown) => toast({ title: "Could not confirm email", description: error instanceof Error ? error.message : "Request a new confirmation email.", variant: "destructive" }))
@@ -292,7 +307,7 @@ export default function Auth() {
                 : "Sign Up"}
             </Button>
           </form>
-          {false && !isForgot && (
+          {!isForgot && (
             <>
               <div className="relative my-4">
                 <div className="absolute inset-0 flex items-center">
@@ -307,7 +322,7 @@ export default function Auth() {
                 variant="outline"
                 className="w-full gap-2"
                 disabled={loading}
-                onClick={() => toast({ title: "Google sign-in is not available yet" })}
+                onClick={() => window.location.assign("/api/auth/google")}
               >
                 <svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                   <path fill="#4285F4" d="M14.9 8.161c0-.476-.039-.954-.121-1.422h-6.64v2.695h3.802a3.24 3.24 0 01-1.407 2.127v1.75h2.269c1.332-1.22 2.097-3.02 2.097-5.15z"/>
@@ -315,7 +330,7 @@ export default function Auth() {
                   <path fill="#FBBC04" d="M4.187 9.342a4.17 4.17 0 010-2.68V4.859H1.849a6.97 6.97 0 000 6.286l2.338-1.803z"/>
                   <path fill="#EA4335" d="M8.14 3.77a3.837 3.837 0 012.7 1.05l2.01-1.999a6.786 6.786 0 00-4.71-1.82 7.042 7.042 0 00-6.29 3.858L4.186 6.66c.556-1.658 2.116-2.89 3.952-2.89z"/>
                 </svg>
-                Google
+                Continue with Google
               </Button>
             </>
           )}

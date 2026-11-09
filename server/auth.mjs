@@ -4,6 +4,7 @@ import { pool } from './db.mjs';
 
 const scrypt = promisify(scryptCallback);
 const COOKIE = 'veyra_session';
+const GOOGLE_STATE_COOKIE = 'veyra_google_oauth';
 const SESSION_DAYS = 30;
 const EMAIL_TOKEN_HOURS = 2;
 const APP_URL = (process.env.APP_URL || process.env.VITE_APP_URL || 'http://localhost:8080').replace(/\/$/, '');
@@ -91,6 +92,77 @@ function setSessionCookie(res, token) {
   res.cookie(COOKIE, token, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/', maxAge: SESSION_DAYS * 86400000 });
 }
 
+function authRedirect(res, error) {
+  return res.redirect(302, `${APP_URL}/auth?error=${encodeURIComponent(error)}`);
+}
+
+function timingSafeStringEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left || ''));
+  const rightBuffer = Buffer.from(String(right || ''));
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+async function availableGoogleUsername(connection, email) {
+  const localPart = email.split('@')[0].toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/^_+|_+$/g, '').slice(0, 24) || 'user';
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const suffix = attempt === 0 ? '' : `_${randomBytes(3).toString('hex')}`;
+    const username = `${localPart.slice(0, 32 - suffix.length)}${suffix}`;
+    const [rows] = await connection.execute('SELECT id FROM profiles WHERE username = ? LIMIT 1', [username]);
+    if (!rows.length) return username;
+  }
+  throw new Error('Could not generate a unique username for the Google account.');
+}
+
+async function createOrVerifyGoogleUser(profile) {
+  const email = normalizeEmail(profile.email);
+  const connection = await pool.getConnection();
+  let userId;
+  try {
+    await connection.beginTransaction();
+    const [identities] = await connection.execute(
+      "SELECT user_id FROM auth_identities WHERE provider = 'google' AND provider_user_id = ? LIMIT 1 FOR UPDATE",
+      [profile.sub],
+    );
+    if (identities.length) {
+      userId = identities[0].user_id;
+    } else {
+      const [users] = await connection.execute('SELECT id FROM auth_users WHERE email = ? LIMIT 1 FOR UPDATE', [email]);
+      if (users.length) {
+        userId = users[0].id;
+      } else {
+        userId = randomUUID();
+        const username = await availableGoogleUsername(connection, email);
+        const displayName = String(profile.name || email.split('@')[0]).trim().slice(0, 80);
+        await connection.execute(
+          'INSERT INTO auth_users (id, email, password_hash, email_verified_at) VALUES (?, ?, ?, UTC_TIMESTAMP(3))',
+          [userId, email, await passwordHash(randomToken())],
+        );
+        await connection.execute('INSERT INTO profiles (id, username, display_name, username_set) VALUES (?, ?, ?, TRUE)', [userId, username, displayName]);
+        await connection.execute("INSERT INTO user_roles (id, user_id, role) VALUES (?, ?, 'user')", [randomUUID(), userId]);
+      }
+      await connection.execute(
+        'INSERT INTO auth_identities (id, user_id, provider, provider_user_id) VALUES (?, ?, ?, ?)',
+        [randomUUID(), userId, 'google', profile.sub],
+      );
+    }
+    await connection.execute('UPDATE auth_users SET email_verified_at = COALESCE(email_verified_at, UTC_TIMESTAMP(3)) WHERE id = ?', [userId]);
+    const [profiles] = await connection.execute('SELECT id FROM profiles WHERE id = ? LIMIT 1', [userId]);
+    if (!profiles.length) {
+      const username = await availableGoogleUsername(connection, email);
+      const displayName = String(profile.name || email.split('@')[0]).trim().slice(0, 80);
+      await connection.execute('INSERT INTO profiles (id, username, display_name, username_set) VALUES (?, ?, ?, TRUE)', [userId, username, displayName]);
+    }
+    await connection.execute("INSERT IGNORE INTO user_roles (id, user_id, role) VALUES (?, ?, 'user')", [randomUUID(), userId]);
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+  return userId;
+}
+
 async function createSession(userId, res) {
   const token = randomToken();
   await pool.execute(
@@ -118,6 +190,83 @@ export async function authenticateRequest(req, res, next) {
 }
 
 export function registerAuthRoutes(app) {
+  app.get('/api/auth/google', (req, res) => {
+    if (!allowRequest(req, res, 'google-auth', 20)) return;
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    if (!clientId || !process.env.GOOGLE_CLIENT_SECRET) return authRedirect(res, 'google_not_configured');
+
+    const state = randomToken();
+    const verifier = randomToken();
+    const challenge = createHash('sha256').update(verifier).digest('base64url');
+    res.cookie(GOOGLE_STATE_COOKIE, `${state}.${verifier}`, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      path: '/api/auth/google',
+      maxAge: 10 * 60 * 1000,
+    });
+    const redirectUri = `${APP_URL}/api/auth/google/callback`;
+    const authorizationUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    authorizationUrl.search = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      scope: 'openid email profile',
+      state,
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+    }).toString();
+    res.redirect(302, authorizationUrl.toString());
+  });
+
+  app.get('/api/auth/google/callback', async (req, res) => {
+    const storedState = cookieValue(req, GOOGLE_STATE_COOKIE);
+    res.clearCookie(GOOGLE_STATE_COOKIE, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      path: '/api/auth/google',
+    });
+    try {
+      if (req.query.error) return authRedirect(res, 'google_access_denied');
+      const [expectedState, verifier] = String(storedState || '').split('.');
+      if (!expectedState || !verifier || !timingSafeStringEqual(expectedState, req.query.state)) return authRedirect(res, 'google_state_invalid');
+      if (!req.query.code) return authRedirect(res, 'google_auth_failed');
+
+      const redirectUri = `${APP_URL}/api/auth/google/callback`;
+      const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: process.env.GOOGLE_CLIENT_ID || '',
+          client_secret: process.env.GOOGLE_CLIENT_SECRET || '',
+          code: String(req.query.code),
+          code_verifier: verifier,
+          grant_type: 'authorization_code',
+          redirect_uri: redirectUri,
+        }),
+      });
+      const tokens = await tokenResponse.json();
+      if (!tokenResponse.ok || !tokens.access_token) throw new Error(`Google token exchange failed (${tokenResponse.status}).`);
+
+      const userInfoResponse = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
+        headers: { Authorization: `Bearer ${tokens.access_token}` },
+      });
+      const profile = await userInfoResponse.json();
+      if (!userInfoResponse.ok || !profile.sub || !profile.email || profile.email_verified !== true) {
+        throw new Error('Google did not return a verified email address.');
+      }
+      const email = normalizeEmail(profile.email);
+      if (!email.endsWith('@gmail.com') && !profile.hd) return authRedirect(res, 'google_email_not_supported');
+      const userId = await createOrVerifyGoogleUser({ ...profile, email });
+      await createSession(userId, res);
+      return res.redirect(302, `${APP_URL}/`);
+    } catch (error) {
+      console.error('Google OAuth callback failed:', error);
+      return authRedirect(res, 'google_auth_failed');
+    }
+  });
+
   app.post('/api/auth/signup', async (req, res) => {
     if (!allowRequest(req, res, 'signup', 5, 60 * 60 * 1000)) return;
     await verifyCaptcha(req.body?.captchaToken, req.ip);
