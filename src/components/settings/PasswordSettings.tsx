@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { authRequest } from "@/lib/authApi";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,8 +9,6 @@ import { toast } from "@/hooks/use-toast";
 import { KeyRound, Eye, EyeOff, Mail } from "lucide-react";
 import { useCooldown, formatCooldown } from "@/lib/cooldown";
 import HCaptcha from "@hcaptcha/react-hcaptcha";
-import TwoFactorChallengeDialog from "@/components/settings/TwoFactorChallengeDialog";
-import { hasVerifiedMfa } from "@/lib/mfa";
 
 const RESET_EMAIL_COOLDOWN_MS = 60 * 1000; // 1 minute between reset emails
 const CHANGE_PASSWORD_COOLDOWN_MS = 30 * 1000; // 30s between change attempts
@@ -24,7 +22,6 @@ export default function PasswordSettings() {
   const [resetting, setResetting] = useState(false);
   const [showCurrent, setShowCurrent] = useState(false);
   const [showNew, setShowNew] = useState(false);
-  const [mfaOpen, setMfaOpen] = useState(false);
   const [captchaToken, setCaptchaToken] = useState<string | null>(null);
   const captchaRef = useRef<HCaptcha>(null);
   const siteKey = import.meta.env.VITE_HCAPTCHA_SITE_KEY;
@@ -45,8 +42,8 @@ export default function PasswordSettings() {
       return;
     }
 
-    if (newPassword.length < 6) {
-      toast({ title: "Password too short", description: "At least 6 characters.", variant: "destructive" });
+    if (newPassword.length < 8) {
+      toast({ title: "Password too short", description: "At least 8 characters.", variant: "destructive" });
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -59,38 +56,20 @@ export default function PasswordSettings() {
     }
 
     setLoading(true);
-    // Re-verify the current password by signing in again.
-    const { error: verifyError } = await supabase.auth.signInWithPassword({
-      email: user.email,
-      password: currentPassword,
-    });
-    if (verifyError) {
-      setLoading(false);
-      // Start cooldown on failed attempt to slow brute-force guessing.
-      changeCooldown.trigger(CHANGE_PASSWORD_COOLDOWN_MS);
-      toast({ title: "Current password is incorrect", variant: "destructive" });
-      return;
-    }
-
-    // If the user has 2FA enabled, ask for a code before applying the change.
-    const needsMfa = await hasVerifiedMfa();
-    setLoading(false);
-    if (needsMfa) {
-      setMfaOpen(true);
-      return;
-    }
-
     await performUpdate();
   };
 
   const performUpdate = async () => {
     setLoading(true);
-    const { error } = await supabase.auth.updateUser({ password: newPassword });
-    setLoading(false);
-    if (error) {
-      toast({ title: "Could not update password", description: error.message, variant: "destructive" });
+    try {
+      await authRequest("change-password", { current_password: currentPassword, password: newPassword });
+    } catch (error) {
+      setLoading(false);
+      changeCooldown.trigger(CHANGE_PASSWORD_COOLDOWN_MS);
+      toast({ title: "Could not update password", description: error instanceof Error ? error.message : "Password update failed.", variant: "destructive" });
       return;
     }
+    setLoading(false);
 
     setCurrentPassword("");
     setNewPassword("");
@@ -117,10 +96,9 @@ export default function PasswordSettings() {
       return;
     }
     setResetting(true);
-    const { error } = await supabase.auth.resetPasswordForEmail(user.email, {
-      redirectTo: `${window.location.origin}/reset-password`,
-      captchaToken: captchaToken ?? undefined,
-    });
+    let error: Error | null = null;
+    try { await authRequest("forgot", { email: user.email, captchaToken }); }
+    catch (caught) { error = caught instanceof Error ? caught : new Error("Could not send email."); }
     setResetting(false);
     captchaRef.current?.resetCaptcha();
     setCaptchaToken(null);
@@ -175,7 +153,7 @@ export default function PasswordSettings() {
                 onChange={(e) => setNewPassword(e.target.value)}
                 className="pr-10"
                 required
-                minLength={6}
+                minLength={8}
               />
               <button
                 type="button"
@@ -194,7 +172,7 @@ export default function PasswordSettings() {
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               required
-              minLength={6}
+              minLength={8}
             />
           </div>
           <div className="space-y-1">
@@ -250,12 +228,6 @@ export default function PasswordSettings() {
         </div>
       </CardContent>
 
-      <TwoFactorChallengeDialog
-        open={mfaOpen}
-        onOpenChange={setMfaOpen}
-        description="Enter the 6-digit code from your authenticator app to confirm your password change."
-        onVerified={performUpdate}
-      />
     </Card>
   );
 }

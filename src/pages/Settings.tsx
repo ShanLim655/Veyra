@@ -13,10 +13,6 @@ import { exceedsMaxUploadSize, MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_LABEL } fr
 import { ArrowLeft, Camera, Sun, Moon, Monitor, LogOut, User, Bell, Palette, Shield, Image as ImageIcon } from "lucide-react";
 import NotificationSettings from "@/components/settings/NotificationSettings";
 import PasswordSettings from "@/components/settings/PasswordSettings";
-import EmailSettings from "@/components/settings/EmailSettings";
-import LinkedAccounts from "@/components/settings/LinkedAccounts";
-import TwoFactorSettings from "@/components/settings/TwoFactorSettings";
-import SessionManagement from "@/components/settings/SessionManagement";
 import PrivacySettings from "@/components/settings/PrivacySettings";
 import AvatarCropDialog from "@/components/settings/AvatarCropDialog";
 import { Textarea } from "@/components/ui/textarea";
@@ -772,12 +768,8 @@ export default function Settings() {
 
           {/* Account Tab */}
           <TabsContent value="account" className="space-y-6 mt-6">
-            <EmailSettings />
             <PasswordSettings />
             <PrivacySettings />
-            <TwoFactorSettings />
-            <SessionManagement />
-            <LinkedAccounts />
 
             <Card>
               <CardHeader>

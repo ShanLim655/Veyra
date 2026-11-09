@@ -17,15 +17,11 @@ type QueryPayload = {
 };
 
 async function request(body: Record<string, unknown>): Promise<QueryResult> {
-  const { data: { session } } = await authClient.auth.getSession();
-  if (!session?.access_token) return { data: null, error: { message: 'You are signed out.' }, count: null };
   try {
     const response = await fetch('/api/data', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${session.access_token}`,
-      },
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
     const result = await response.json() as { data?: unknown; error?: string; count?: number | null };
@@ -87,12 +83,11 @@ export class MariaQuery implements PromiseLike<QueryResult> {
 export function fromMariaDB(table: string) { return new MariaQuery(table); }
 
 export async function rpcMariaDB(name: string, args?: Record<string, unknown>) {
-  const { data: { session } } = await authClient.auth.getSession();
-  if (!session?.access_token) return { data: null, error: { message: 'You are signed out.' } };
   try {
     const response = await fetch('/api/rpc', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, args: args || {} }),
     });
     const result = await response.json();
@@ -102,6 +97,3 @@ export async function rpcMariaDB(name: string, args?: Record<string, unknown>) {
   }
 }
 
-// Inject the real Supabase Auth client so the database transport can pass its
-// current access token without exposing MariaDB credentials to the browser.
-import { authClient } from './client-core';

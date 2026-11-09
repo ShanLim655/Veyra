@@ -1,84 +1,29 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import { authRequest } from "@/lib/authApi";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "@/hooks/use-toast";
-import { clearPasswordRecoveryFlag, hasPasswordRecoveryFlag, setPasswordRecoveryFlag } from "@/lib/passwordRecoveryFlag";
 import { Lock, Eye, EyeOff } from "lucide-react";
-
-const isPasswordRecoveryUrl = () => {
-  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-  const searchParams = new URLSearchParams(window.location.search);
-  return hashParams.get("type") === "recovery" || searchParams.get("type") === "recovery";
-};
 
 export default function ResetPassword() {
   const navigate = useNavigate();
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
-  const [ready, setReady] = useState(false);
+  const [ready] = useState(Boolean(new URLSearchParams(window.location.search).get("token")));
   const [show, setShow] = useState(false);
 
   useEffect(() => {
-    let mounted = true;
-
-    const markReady = () => {
-      setPasswordRecoveryFlag();
-      if (mounted) setReady(true);
-    };
-
-    // Handle PKCE / code-based recovery links (?code=...)
-    const url = new URL(window.location.href);
-    const code = url.searchParams.get("code");
-    if (code) {
-      supabase.auth.exchangeCodeForSession(code).then(({ error }) => {
-        if (!mounted) return;
-        if (error) {
-          toast({
-            title: "Invalid or expired link",
-            description: error.message,
-            variant: "destructive",
-          });
-          return;
-        }
-        url.searchParams.delete("code");
-        window.history.replaceState({}, "", url.pathname + url.search + url.hash);
-        markReady();
-      });
-    }
-
-    if (isPasswordRecoveryUrl()) {
-      markReady();
-    }
-
-    const { data: sub } = supabase.auth.onAuthStateChange((event) => {
-      if (event === "PASSWORD_RECOVERY") {
-        markReady();
-      } else if (event === "SIGNED_IN" && hasPasswordRecoveryFlag()) {
-        markReady();
-      }
-    });
-
-    supabase.auth.getSession().then(({ data }) => {
-      if (mounted && data.session && hasPasswordRecoveryFlag()) {
-        setReady(true);
-      }
-    });
-
-    return () => {
-      mounted = false;
-      sub.subscription.unsubscribe();
-    };
+    if (new URLSearchParams(window.location.search).get("error")) toast({ title: "Invalid or expired reset link", variant: "destructive" });
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (password.length < 6) {
-      toast({ title: "Password too short", description: "At least 6 characters.", variant: "destructive" });
+    if (password.length < 8) {
+      toast({ title: "Password too short", description: "At least 8 characters.", variant: "destructive" });
       return;
     }
     if (password !== confirmPassword) {
@@ -86,15 +31,15 @@ export default function ResetPassword() {
       return;
     }
     setLoading(true);
-    const { error } = await supabase.auth.updateUser({ password });
-    setLoading(false);
-    if (error) {
-      toast({ title: "Could not reset password", description: error.message, variant: "destructive" });
+    try {
+      await authRequest("reset-password", { token: new URLSearchParams(window.location.search).get("token"), password });
+    } catch (error) {
+      setLoading(false);
+      toast({ title: "Could not reset password", description: error instanceof Error ? error.message : "Reset failed.", variant: "destructive" });
       return;
     }
+    setLoading(false);
     toast({ title: "Password updated", description: "You can now sign in with your new password." });
-    clearPasswordRecoveryFlag();
-    await supabase.auth.signOut();
     navigate("/auth");
   };
 
@@ -122,7 +67,7 @@ export default function ResetPassword() {
                   onChange={(e) => setPassword(e.target.value)}
                   className="pl-10 pr-10"
                   required
-                  minLength={6}
+                  minLength={8}
                   disabled={!ready}
                 />
                 <button
@@ -145,7 +90,7 @@ export default function ResetPassword() {
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   className="pl-10"
                   required
-                  minLength={6}
+                  minLength={8}
                   disabled={!ready}
                 />
               </div>

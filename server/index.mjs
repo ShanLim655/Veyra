@@ -1,30 +1,21 @@
 import express from 'express';
-import { createClient } from '@supabase/supabase-js';
 import { fileURLToPath } from 'node:url';
 import { pool } from './db.mjs';
 import { queryData } from './data.mjs';
 import { callRpc } from './rpc.mjs';
 import { sendTestNotification } from './notifications.mjs';
 import { purgeExpiredAttachments } from './maintenance.mjs';
+import { authenticateRequest, registerAuthRoutes } from './auth.mjs';
 
 const app = express();
 const port = Number(process.env.PORT || 3001);
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_PUBLISHABLE_KEY;
 
 if (!process.env.MARIADB_USER || !process.env.MARIADB_DATABASE) {
   throw new Error('MARIADB_USER and MARIADB_DATABASE are required.');
 }
-if (!supabaseUrl || !supabaseKey) {
-  throw new Error('SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY are required for Auth token verification.');
-}
-
-const authClient = createClient(supabaseUrl, supabaseKey, {
-  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-});
-
 app.disable('x-powered-by');
 app.use(express.json({ limit: '1mb' }));
+registerAuthRoutes(app);
 
 app.get('/api/health', async (_req, res) => {
   try {
@@ -43,19 +34,7 @@ app.use('/api', async (req, res, next) => {
     req.cronAuthorized = true;
     return next();
   }
-  const authorization = req.get('authorization') || '';
-  const match = authorization.match(/^Bearer\s+(.+)$/i);
-  if (!match) return res.status(401).json({ error: 'Authentication required.' });
-
-  try {
-    const { data, error } = await authClient.auth.getUser(match[1]);
-    if (error || !data.user) return res.status(401).json({ error: 'Invalid or expired session.' });
-    req.user = data.user;
-    req.accessToken = match[1];
-    next();
-  } catch {
-    res.status(401).json({ error: 'Unable to verify session.' });
-  }
+  authenticateRequest(req, res, next);
 });
 
 app.post('/api/data', async (req, res) => {
@@ -88,6 +67,11 @@ app.post('/api/maintenance/purge-expired-attachments', async (req, res) => {
   }
   try { res.json(await purgeExpiredAttachments()); }
   catch (error) { res.status(500).json({ error: error.message || 'Attachment cleanup failed.' }); }
+});
+
+app.use((error, _req, res, _next) => {
+  console.error('API request failed:', error);
+  res.status(error.status || 500).json({ error: error.status ? error.message : 'The server could not complete the request.' });
 });
 
 app.use('/api', (_req, res) => res.status(404).json({ error: 'API route not found.' }));

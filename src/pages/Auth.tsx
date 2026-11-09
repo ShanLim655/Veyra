@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import { authRequest, notifyAuthChanged } from "@/lib/authApi";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -9,7 +9,6 @@ import { toast } from "@/hooks/use-toast";
 import { Mail, Lock, User, Eye, EyeOff } from "lucide-react";
 import { useCooldown, formatCooldown } from "@/lib/cooldown";
 import HCaptcha from "@hcaptcha/react-hcaptcha";
-import TwoFactorChallengeDialog from "@/components/settings/TwoFactorChallengeDialog";
 
 type Mode = "login" | "signup" | "forgot";
 
@@ -31,13 +30,25 @@ export default function Auth() {
   const captchaRef = useRef<HCaptcha>(null);
   const navigate = useNavigate();
   const siteKey = import.meta.env.VITE_HCAPTCHA_SITE_KEY;
-  const [mfaOpen, setMfaOpen] = useState(false);
 
   // Reset the captcha widget when switching auth modes so the token cannot be reused across flows.
   useEffect(() => {
     captchaRef.current?.resetCaptcha();
     setCaptchaToken(null);
   }, [mode]);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const token = url.searchParams.get("token");
+    if (!token) return;
+    authRequest("verify", { token })
+      .then(() => toast({ title: "Email confirmed", description: "Your account is ready. Sign in to continue." }))
+      .catch((error: unknown) => toast({ title: "Could not confirm email", description: error instanceof Error ? error.message : "Request a new confirmation email.", variant: "destructive" }))
+      .finally(() => {
+        url.searchParams.delete("token");
+        window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+      });
+  }, []);
 
   // Per-email cooldown so spamming the form for one address doesn't block others.
   const normalizedEmail = email.trim().toLowerCase();
@@ -53,24 +64,6 @@ export default function Auth() {
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!siteKey) {
-      toast({
-        title: "Configuration error",
-        description: "hCaptcha site key is not configured. Please check your environment settings.",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    if (!captchaToken) {
-      toast({
-        title: "Captcha required",
-        description: "Please complete the captcha challenge before continuing.",
-        variant: "destructive",
-      });
-      return;
-    }
-
     if (isForgot) {
       if (resetCooldown.remaining > 0) {
         toast({
@@ -84,11 +77,7 @@ export default function Auth() {
       }
       setLoading(true);
       try {
-        const { error } = await supabase.auth.resetPasswordForEmail(email, {
-          redirectTo: `${window.location.origin}/reset-password`,
-          captchaToken,
-        });
-        if (error) throw error;
+        await authRequest("forgot", { email, captchaToken });
         resetCooldown.trigger(RESET_EMAIL_COOLDOWN_MS);
         toast({
           title: "Check your email",
@@ -114,10 +103,10 @@ export default function Auth() {
       return;
     }
 
-    if (!isLogin && password.length < 6) {
+    if (!isLogin && password.length < 8) {
       toast({
         title: "Password too short",
-        description: "Password must be at least 6 characters.",
+        description: "Password must be at least 8 characters.",
         variant: "destructive",
       });
       resetCaptcha();
@@ -128,40 +117,17 @@ export default function Auth() {
 
     try {
       if (isLogin) {
-        const { error } = await supabase.auth.signInWithPassword({
-          email,
-          password,
-          options: { captchaToken },
-        });
-        if (error) throw error;
-        // If the account has 2FA enabled, the session is only AAL1 until a
-        // TOTP code is verified. Require it before letting the user in.
-        const { data: aal } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
-        if (aal?.nextLevel === "aal2" && aal.currentLevel !== "aal2") {
-          setMfaOpen(true);
-          setLoading(false);
-          return;
-        }
+        await authRequest("login", { email, password, captchaToken });
+        notifyAuthChanged();
         toast({ title: "Welcome back!", description: "Successfully logged in." });
         navigate("/");
       } else {
-        const { error } = await supabase.auth.signUp({
-          email,
-          password,
-          options: {
-            captchaToken,
-            emailRedirectTo: `${window.location.origin}/`,
-            data: {
-              username: username || email.split("@")[0],
-              display_name: username || email.split("@")[0],
-              username_set: true,
-            },
-          },
+        const result = await authRequest<{ ok: boolean; message: string }>("signup", {
+          email, password, captchaToken, username: username || email.split("@")[0], display_name: username || email.split("@")[0],
         });
-        if (error) throw error;
         toast({
           title: "Account created!",
-          description: "Check your email to confirm your account, or log in if email confirmation is disabled.",
+          description: result.message,
         });
         resetCaptcha();
       }
@@ -254,7 +220,7 @@ export default function Auth() {
                     onChange={(e) => setPassword(e.target.value)}
                     className="pl-10 pr-10"
                     required
-                    minLength={6}
+                    minLength={8}
                   />
                   <button
                     type="button"
@@ -283,7 +249,7 @@ export default function Auth() {
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     className="pl-10 pr-10"
                     required
-                    minLength={6}
+                    minLength={8}
                   />
                   <button
                     type="button"
@@ -326,7 +292,7 @@ export default function Auth() {
                 : "Sign Up"}
             </Button>
           </form>
-          {!isForgot && (
+          {false && !isForgot && (
             <>
               <div className="relative my-4">
                 <div className="absolute inset-0 flex items-center">
@@ -341,19 +307,7 @@ export default function Auth() {
                 variant="outline"
                 className="w-full gap-2"
                 disabled={loading}
-                onClick={async () => {
-                  setLoading(true);
-                  try {
-                    const { error } = await supabase.auth.signInWithOAuth({
-                      provider: "google",
-                      options: { redirectTo: `${window.location.origin}/` },
-                    });
-                    if (error) throw error;
-                  } catch (error: any) {
-                    toast({ title: "Error", description: error.message, variant: "destructive" });
-                    setLoading(false);
-                  }
-                }}
+                onClick={() => toast({ title: "Google sign-in is not available yet" })}
               >
                 <svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                   <path fill="#4285F4" d="M14.9 8.161c0-.476-.039-.954-.121-1.422h-6.64v2.695h3.802a3.24 3.24 0 01-1.407 2.127v1.75h2.269c1.332-1.22 2.097-3.02 2.097-5.15z"/>
@@ -392,19 +346,6 @@ export default function Auth() {
         </CardContent>
       </Card>
 
-      <TwoFactorChallengeDialog
-        open={mfaOpen}
-        onOpenChange={setMfaOpen}
-        description="Enter the 6-digit code from your authenticator app to finish signing in."
-        onVerified={() => {
-          toast({ title: "Welcome back!", description: "Successfully logged in." });
-          navigate("/");
-        }}
-        onCancel={() => {
-          // Abandoning 2FA means the login is incomplete — sign back out.
-          supabase.auth.signOut();
-        }}
-      />
     </div>
   );
 }

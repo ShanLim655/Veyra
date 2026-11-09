@@ -118,7 +118,7 @@ export async function callRpc(userId, name, args = {}) {
     }
     case 'get_user_sessions':
     case 'revoke_user_session':
-      throw new Error('Session management is handled by Supabase Auth and is not available through MariaDB.');
+      throw new Error('Session management is not available through the data RPC API.');
     default: throw new Error(`Unsupported database action: ${name}`);
   }
 }

@@ -10,8 +10,8 @@ if (!url || !publishableKey) {
 
 export const authClient = createClient<Database>(url, publishableKey, {
   auth: {
-    storage: localStorage,
-    persistSession: true,
-    autoRefreshToken: true,
+    persistSession: false,
+    autoRefreshToken: false,
+    detectSessionInUrl: false,
   },
 });

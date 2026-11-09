@@ -21,14 +21,14 @@ export async function logAdminAction(
   details?: LogDetails
 ): Promise<boolean> {
   try {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) {
+    const currentUser = await fetch('/api/auth/me', { credentials: 'same-origin' }).then((response) => response.ok ? response.json() : null);
+    if (!currentUser?.user) {
       console.error("No authenticated user for admin log");
       return false;
     }
 
     const insertData = {
-      admin_id: user.id,
+      admin_id: currentUser.user.id,
       action,
       target_type: targetType,
       target_id: targetId || null,

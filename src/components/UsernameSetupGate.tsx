@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { toast } from "@/hooks/use-toast";
 
 /**
- * Shows a blocking dialog for users (typically new Google signups) who haven't
+ * Shows a blocking dialog for accounts which haven't
  * picked their own username yet. Once they confirm one, profiles.username_set
  * is flipped to true so the dialog never re-appears.
  */

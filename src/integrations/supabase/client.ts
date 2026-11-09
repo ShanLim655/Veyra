@@ -3,11 +3,9 @@ import { authClient } from './client-core';
 import { fromMariaDB, rpcMariaDB } from './data-api';
 
 async function sendNotificationTest() {
-  const { data: { session } } = await authClient.auth.getSession();
-  if (!session?.access_token) return { data: null, error: { message: 'You are signed out.' } };
   try {
     const response = await fetch('/api/notifications/test', {
-      method: 'POST', headers: { Authorization: `Bearer ${session.access_token}` },
+      method: 'POST', credentials: 'same-origin',
     });
     const data = await response.json() as { ok?: boolean; error?: string | null };
     return response.ok ? { data, error: null } : { data: null, error: { message: data.error || 'Notification failed.' } };
@@ -63,8 +61,8 @@ function mariaRealtimeChannel(name: string) {
   return channel;
 }
 
-// Auth, MFA, Storage, Edge Functions and Presence remain on Supabase. Table
-// data and RPC calls are routed through the authenticated MariaDB API.
+// Supabase is used for Storage and Realtime presence. Authentication, table
+// data, and RPC calls are handled by the Veyra API and MariaDB.
 export const supabase = new Proxy(authClient, {
   get(target, property, receiver) {
     if (property === 'from') return (table: string) => fromMariaDB(table);

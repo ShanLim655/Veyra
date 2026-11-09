@@ -2,6 +2,8 @@
 
 > Veyra is a real-time messaging app for chatting with friends one-on-one or in private group chats, with reactions, replies, polls, voice notes, file attachments, and @mentions.
 
+Veyra accounts, password hashes, sessions, and email verification are managed by the Node API and MariaDB. The Node API sends verification and password reset email through Sequenzy's transactional API. Supabase is used only for Storage.
+
 ## Pages
 
 - [Home](/): Landing page and app entry point.
