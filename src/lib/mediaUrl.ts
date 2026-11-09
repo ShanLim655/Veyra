@@ -88,13 +88,15 @@ export async function signChatUrl(
   if (inFlight) return inFlight;
 
   const request = (async () => {
-    const { data, error } = await supabase.storage
-      .from(parsed.bucket)
-      .createSignedUrl(parsed.path, expiresIn);
-    if (error || !data?.signedUrl) return url;
+    const response = await fetch('/api/storage/chat-read', {
+      method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bucket: parsed.bucket, path: parsed.path }),
+    });
+    const result = await response.json() as { url?: string };
+    if (!response.ok || !result.url) return url;
     if (signedUrlCache.size >= 500) signedUrlCache.delete(signedUrlCache.keys().next().value!);
-    signedUrlCache.set(url, { url: data.signedUrl, expiresAt: Date.now() + expiresIn * 1000 - 60_000 });
-    return data.signedUrl;
+    signedUrlCache.set(url, { url: result.url, expiresAt: Date.now() + expiresIn * 1000 - 60_000 });
+    return result.url;
   })();
   signingRequests.set(url, request);
   try {

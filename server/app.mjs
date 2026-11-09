@@ -115,6 +115,30 @@ export function createApp() {
       res.status(503).json({ error: 'Chat media storage is not configured.' });
     }
   });
+  app.post('/api/storage/chat-read', async (req, res) => {
+    const { bucket, path } = req.body || {};
+    const parts = typeof path === 'string' ? path.split('/') : [];
+    if (!CHAT_UPLOAD_BUCKETS.has(bucket) || parts.length < 3 || parts.length > 8
+      || parts.some((part) => !part || part === '.' || part === '..') || path.length > 512) {
+      return res.status(400).json({ error: 'Invalid media path.' });
+    }
+    const scope = parts[1];
+    try {
+      if (scope !== 'global' && scope !== 'announcements') {
+        const [members] = await pool.execute(
+          'SELECT 1 FROM conversation_members WHERE conversation_id = ? AND user_id = ? LIMIT 1',
+          [scope, req.user.id],
+        );
+        if (!members.length) return res.status(403).json({ error: 'You cannot access this conversation media.' });
+      }
+      const { data, error } = await getSupabaseAdmin().storage.from(bucket).createSignedUrl(path, 3600);
+      if (error || !data?.signedUrl) return res.status(404).json({ error: 'Media is missing or unavailable.' });
+      res.set('Cache-Control', 'private, max-age=300').json({ url: data.signedUrl, expiresIn: 3600 });
+    } catch (error) {
+      console.error('Chat media read signing failed:', error);
+      res.status(503).json({ error: 'Chat media storage is unavailable.' });
+    }
+  });
   app.post('/api/maintenance/purge-expired-attachments', async (req, res) => {
     if (!req.cronAuthorized) {
       const [rows] = await pool.execute("SELECT 1 FROM user_roles WHERE user_id = ? AND role = 'super_admin' LIMIT 1", [req.user.id]);
