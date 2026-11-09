@@ -4,6 +4,10 @@
     {
       "source": "/api/:apiPath*",
       "destination": "/api/index"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
     }
   ]
 }
