@@ -8,6 +8,7 @@ import { Link } from 'react-router-dom';
 export default function Pair() {
   const { user, loading } = useAuth();
   const code = new URLSearchParams(window.location.search).get('code') || '';
+  const oauthError = new URLSearchParams(window.location.search).get('error');
   const [done, setDone] = useState(false);
   const [error, setError] = useState('');
 
@@ -31,6 +32,15 @@ export default function Pair() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          {oauthError && <p className="text-sm text-destructive" role="alert">{
+            oauthError === 'google_not_configured'
+              ? 'Google sign-in is not configured on the Veyra server.'
+              : oauthError === 'google_access_denied'
+                ? 'Google sign-in was cancelled. You can sign in another way or try again.'
+                : oauthError === 'google_email_not_supported'
+                  ? 'Use a Gmail or Google Workspace account to sign in.'
+                  : 'Google sign-in failed. Please try again.'
+          }</p>}
           {user && <p>Signed in as <strong>{user.email}</strong></p>}
           {!loading && !user && (
             <div className="space-y-3">
