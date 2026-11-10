@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { authRequest, notifyAuthChanged } from "@/lib/authApi";
+import { isNativeVeyraApp, openSystemBrowser, setNativeSessionToken } from "@/lib/nativeSession";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -24,12 +25,15 @@ export default function Auth() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [username, setUsername] = useState("");
   const [loading, setLoading] = useState(false);
+  const [googleProgress, setGoogleProgress] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [captchaToken, setCaptchaToken] = useState<string | null>(null);
   const captchaRef = useRef<HCaptcha>(null);
   const navigate = useNavigate();
   const siteKey = import.meta.env.VITE_HCAPTCHA_SITE_KEY;
+  const requestedReturnTo = new URLSearchParams(window.location.search).get('returnTo') || '/';
+  const returnTo = requestedReturnTo.startsWith('/') && !requestedReturnTo.startsWith('//') ? requestedReturnTo : '/';
 
   // Reset the captcha widget when switching auth modes so the token cannot be reused across flows.
   useEffect(() => {
@@ -135,7 +139,7 @@ export default function Auth() {
         await authRequest("login", { email, password, captchaToken });
         notifyAuthChanged();
         toast({ title: "Welcome back!", description: "Successfully logged in." });
-        navigate("/");
+        navigate(returnTo);
       } else {
         const result = await authRequest<{ ok: boolean; message: string }>("signup", {
           email, password, captchaToken, username: username || email.split("@")[0], display_name: username || email.split("@")[0],
@@ -155,6 +159,51 @@ export default function Auth() {
       resetCaptcha();
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setLoading(true);
+    setGoogleProgress('');
+    try {
+      if (!isNativeVeyraApp()) {
+        const query = returnTo !== '/' ? `?returnTo=${encodeURIComponent(returnTo)}` : '';
+        window.location.assign(`/api/auth/google${query}`);
+        return;
+      }
+
+      const clientId = window.veyraDesktop ? 'desktop' : 'android';
+      const pairing = await authRequest<{ code: string; approveUrl: string; expiresIn: number }>(
+        'native/pair/start', { clientId },
+      );
+      setGoogleProgress('Finish sign-in in your browser, then approve this device.');
+      await openSystemBrowser(pairing.approveUrl);
+
+      const expiresAt = Date.now() + pairing.expiresIn * 1000;
+      while (Date.now() < expiresAt) {
+        const result = await authRequest<{ pending?: boolean; token?: string; clientId?: string }>(
+          'native/exchange', { code: pairing.code, clientId },
+        );
+        if (result.token) {
+          if (result.clientId !== clientId) throw new Error('This pairing request belongs to a different Veyra app.');
+          await setNativeSessionToken(result.token);
+          notifyAuthChanged();
+          toast({ title: 'Signed in', description: 'This app is now connected to your Veyra account.' });
+          navigate('/');
+          return;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      }
+      throw new Error('Device approval expired. Please try signing in again.');
+    } catch (error) {
+      toast({
+        title: 'Google sign-in failed',
+        description: error instanceof Error ? error.message : 'Could not complete sign-in.',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
+      setGoogleProgress('');
     }
   };
 
@@ -322,7 +371,7 @@ export default function Auth() {
                 variant="outline"
                 className="w-full gap-2"
                 disabled={loading}
-                onClick={() => window.location.assign("/api/auth/google")}
+                onClick={() => void handleGoogleSignIn()}
               >
                 <svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                   <path fill="#4285F4" d="M14.9 8.161c0-.476-.039-.954-.121-1.422h-6.64v2.695h3.802a3.24 3.24 0 01-1.407 2.127v1.75h2.269c1.332-1.22 2.097-3.02 2.097-5.15z"/>
@@ -330,8 +379,9 @@ export default function Auth() {
                   <path fill="#FBBC04" d="M4.187 9.342a4.17 4.17 0 010-2.68V4.859H1.849a6.97 6.97 0 000 6.286l2.338-1.803z"/>
                   <path fill="#EA4335" d="M8.14 3.77a3.837 3.837 0 012.7 1.05l2.01-1.999a6.786 6.786 0 00-4.71-1.82 7.042 7.042 0 00-6.29 3.858L4.186 6.66c.556-1.658 2.116-2.89 3.952-2.89z"/>
                 </svg>
-                Continue with Google
+                {googleProgress ? 'Waiting for approval…' : 'Continue with Google'}
               </Button>
+              {googleProgress && <p className="mt-2 text-center text-xs text-muted-foreground">{googleProgress}</p>}
             </>
           )}
           <div className="mt-4 text-center space-y-2">

@@ -1,3 +1,5 @@
+import { apiFetch } from '@/lib/nativeSession';
+
 export type VeyraUser = {
   id: string;
   email: string;
@@ -10,7 +12,7 @@ let authChangeVersion = 0;
 export function getAuthChangeVersion() { return authChangeVersion; }
 
 export async function authRequest<T = { ok: boolean; message?: string }>(path: string, body?: Record<string, unknown>): Promise<T> {
-  const response = await fetch(`/api/auth/${path}`, {
+  const response = await apiFetch(`/api/auth/${path}`, {
     method: body ? "POST" : "GET",
     credentials: "same-origin",
     headers: body ? { "Content-Type": "application/json" } : undefined,
@@ -38,3 +40,4 @@ export function notifyAuthChanged(user?: VeyraUser | null) {
   const detail = user === undefined ? {} : { resolved: true, user };
   window.dispatchEvent(new CustomEvent("veyra-auth-changed", { detail }));
 }
+

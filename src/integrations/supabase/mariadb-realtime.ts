@@ -1,4 +1,5 @@
 import { authClient } from './client-core';
+import { apiFetch } from '@/lib/nativeSession';
 
 const PUBLIC_TOPIC = 'veyra-public-mariadb';
 const PUBLIC_TABLES = new Set(['global_messages', 'announcement_messages']);
@@ -97,7 +98,7 @@ async function ensureUserTopic() {
   const revision = identityRevision;
   userTopicRequest = (async () => {
     try {
-      const response = await fetch('/api/realtime/topic', { credentials: 'same-origin' });
+      const response = await apiFetch('/api/realtime/topic');
       const result = await response.json() as { topic?: string };
       if (!response.ok || !result.topic || userId !== requestedUser || identityRevision !== revision) return;
       userTopic = result.topic;

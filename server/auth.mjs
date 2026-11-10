@@ -92,8 +92,21 @@ function setSessionCookie(res, token) {
   res.cookie(COOKIE, token, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/', maxAge: SESSION_DAYS * 86400000 });
 }
 
-function authRedirect(res, error) {
-  return res.redirect(302, `${APP_URL}/auth?error=${encodeURIComponent(error)}`);
+function safeReturnTo(value) {
+  const candidate = String(value || '/').trim();
+  if (!candidate.startsWith('/') || candidate.startsWith('//') || candidate.includes('\\')) return '/';
+  try {
+    const parsed = new URL(candidate, APP_URL);
+    return parsed.origin === new URL(APP_URL).origin ? `${parsed.pathname}${parsed.search}${parsed.hash}` : '/';
+  } catch {
+    return '/';
+  }
+}
+
+function authRedirect(res, error, returnPath = '/auth') {
+  const url = new URL(`${APP_URL}${safeReturnTo(returnPath)}`);
+  url.searchParams.set('error', error);
+  return res.redirect(302, url.toString());
 }
 
 function timingSafeStringEqual(left, right) {
@@ -200,7 +213,7 @@ export function registerAuthRoutes(app) {
       'INSERT INTO auth_native_codes (id, code_hash, client_id, expires_at) VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 5 MINUTE))',
       [id, hashToken(code), clientId],
     );
-    res.json({ code, approveUrl: `${APP_URL}/pair?code=${encodeURIComponent(code)}`, expiresIn: 300 });
+    res.json({ code, clientId, approveUrl: `${APP_URL}/pair?code=${encodeURIComponent(code)}`, expiresIn: 300 });
   });
 
   app.post('/api/auth/native/pair/approve', authenticateRequest, async (req, res) => {
@@ -215,16 +228,24 @@ export function registerAuthRoutes(app) {
 
   app.post('/api/auth/native/exchange', async (req, res) => {
     const code = String(req.body?.code || '');
+    const clientId = String(req.body?.clientId || '');
+    if (code.length < 32 || code.length > 128 || !['android', 'desktop'].includes(clientId)) {
+      return res.status(400).json({ error: 'Invalid pairing request.' });
+    }
     const connection = await pool.getConnection();
     try {
       await connection.beginTransaction();
       const [rows] = await connection.execute(
-        'SELECT id, user_id, client_id FROM auth_native_codes WHERE code_hash = ? AND consumed_at IS NULL AND expires_at > UTC_TIMESTAMP(3) LIMIT 1 FOR UPDATE',
-        [hashToken(code)],
+        'SELECT id, user_id, client_id FROM auth_native_codes WHERE code_hash = ? AND client_id = ? AND consumed_at IS NULL AND expires_at > UTC_TIMESTAMP(3) LIMIT 1 FOR UPDATE',
+        [hashToken(code), clientId],
       );
-      if (!rows.length || !rows[0].user_id) {
+      if (!rows.length) {
         await connection.rollback();
-        return res.status(400).json({ error: 'Pairing code is invalid, expired, or not approved yet.' });
+        return res.status(400).json({ error: 'Pairing code is invalid or expired.' });
+      }
+      if (!rows[0].user_id) {
+        await connection.rollback();
+        return res.status(202).json({ pending: true });
       }
       const token = randomToken();
       await connection.execute(
@@ -232,7 +253,10 @@ export function registerAuthRoutes(app) {
         [randomUUID(), rows[0].user_id, hashToken(token), SESSION_DAYS],
       );
       await connection.execute('UPDATE auth_native_codes SET consumed_at = UTC_TIMESTAMP(3) WHERE id = ?', [rows[0].id]);
-      const [users] = await connection.execute('SELECT id, email FROM auth_users WHERE id = ? LIMIT 1', [rows[0].user_id]);
+      const [users] = await connection.execute(
+        'SELECT u.id, u.email, p.username, p.display_name FROM auth_users u JOIN profiles p ON p.id = u.id WHERE u.id = ? LIMIT 1',
+        [rows[0].user_id],
+      );
       await connection.commit();
       res.json({ token, clientId: rows[0].client_id, user: users[0] });
     } catch (error) {
@@ -244,12 +268,12 @@ export function registerAuthRoutes(app) {
   app.get('/api/auth/google', (req, res) => {
     if (!allowRequest(req, res, 'google-auth', 20)) return;
     const clientId = process.env.GOOGLE_CLIENT_ID;
-    if (!clientId || !process.env.GOOGLE_CLIENT_SECRET) return authRedirect(res, 'google_not_configured');
-
+    const returnTo = safeReturnTo(req.query.returnTo);
+    if (!clientId || !process.env.GOOGLE_CLIENT_SECRET) return authRedirect(res, 'google_not_configured', returnTo);
     const state = randomToken();
     const verifier = randomToken();
     const challenge = createHash('sha256').update(verifier).digest('base64url');
-    res.cookie(GOOGLE_STATE_COOKIE, `${state}.${verifier}`, {
+    res.cookie(GOOGLE_STATE_COOKIE, `${state}.${verifier}.${Buffer.from(returnTo).toString('base64url')}`, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
@@ -263,6 +287,7 @@ export function registerAuthRoutes(app) {
       redirect_uri: redirectUri,
       response_type: 'code',
       scope: 'openid email profile',
+      prompt: 'select_account',
       state,
       code_challenge: challenge,
       code_challenge_method: 'S256',
@@ -279,8 +304,14 @@ export function registerAuthRoutes(app) {
       path: '/api/auth/google',
     });
     try {
-      if (req.query.error) return authRedirect(res, 'google_access_denied');
-      const [expectedState, verifier] = String(storedState || '').split('.');
+      const [expectedState, verifier, encodedReturnTo] = String(storedState || '').split('.');
+      let returnTo = '/';
+      try { if (encodedReturnTo) returnTo = safeReturnTo(Buffer.from(encodedReturnTo, 'base64url').toString()); } catch {}
+      if (req.query.error) {
+        const errorUrl = new URL(`${APP_URL}${returnTo === '/' ? '/auth' : returnTo}`);
+        errorUrl.searchParams.set('error', 'google_access_denied');
+        return res.redirect(302, errorUrl.toString());
+      }
       if (!expectedState || !verifier || !timingSafeStringEqual(expectedState, req.query.state)) return authRedirect(res, 'google_state_invalid');
       if (!req.query.code) return authRedirect(res, 'google_auth_failed');
 
@@ -311,7 +342,7 @@ export function registerAuthRoutes(app) {
       if (!email.endsWith('@gmail.com') && !profile.hd) return authRedirect(res, 'google_email_not_supported');
       const userId = await createOrVerifyGoogleUser({ ...profile, email });
       await createSession(userId, res);
-      return res.redirect(302, `${APP_URL}/`);
+      return res.redirect(302, `${APP_URL}${returnTo}`);
     } catch (error) {
       console.error('Google OAuth callback failed:', error);
       return authRedirect(res, 'google_auth_failed');
@@ -370,8 +401,11 @@ export function registerAuthRoutes(app) {
 
   app.get('/api/auth/me', authenticateRequest, (req, res) => res.json({ user: req.user }));
   app.post('/api/auth/logout', async (req, res) => {
-    const token = cookieValue(req, COOKIE);
-    if (token) await pool.execute('DELETE FROM auth_sessions WHERE token_hash = ?', [hashToken(token)]);
+    const authorization = String(req.headers.authorization || '');
+    const bearerToken = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : null;
+    const cookieToken = cookieValue(req, COOKIE);
+    const tokens = [...new Set([bearerToken, cookieToken].filter(Boolean))];
+    if (tokens.length) await pool.execute(`DELETE FROM auth_sessions WHERE token_hash IN (${tokens.map(() => '?').join(',')})`, tokens.map(hashToken));
     res.clearCookie(COOKIE, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/' });
     res.json({ ok: true });
   });

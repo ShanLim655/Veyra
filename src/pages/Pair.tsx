@@ -3,6 +3,7 @@ import { authRequest } from '@/lib/authApi';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useAuth } from '@/hooks/useAuth';
+import { Link } from 'react-router-dom';
 
 export default function Pair() {
   const { user, loading } = useAuth();
@@ -31,7 +32,14 @@ export default function Pair() {
         </CardHeader>
         <CardContent className="space-y-4">
           {user && <p>Signed in as <strong>{user.email}</strong></p>}
-          {!loading && !user && <p>Sign in to Veyra in this browser, then reopen this pairing link.</p>}
+          {!loading && !user && (
+            <div className="space-y-3">
+              <p>Sign in to the Veyra account you want to use on this device.</p>
+              <Button asChild className="w-full">
+                <Link to={`/auth?returnTo=${encodeURIComponent(`/pair?code=${code}`)}`}>Sign in to continue</Link>
+              </Button>
+            </div>
+          )}
           <p className="break-all text-xs text-muted-foreground">Code: {code || 'Missing code'}</p>
           {error && <p className="text-sm text-destructive">{error}</p>}
           {!done && <Button onClick={() => void approve()} disabled={!user || !code}>Approve this device</Button>}

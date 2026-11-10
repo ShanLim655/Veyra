@@ -77,6 +77,12 @@ Create a Web application OAuth client and configure its consent screen in [Googl
 
 The project uses one Vercel Function for all `/api/*` requests, so it stays within the Hobby plan function limit; no proxy target or VPS is required. Add `MARIADB_HOST`, `MARIADB_PORT`, `MARIADB_DATABASE`, `MARIADB_USER`, and `MARIADB_PASSWORD` as Vercel environment variables. MariaDB must accept connections from Vercel Functions. A database bound only to `127.0.0.1` or a private network cannot be reached by Vercel. Add `APP_URL`, Google, Sequenzy, and other server-only settings there as well.
 
+### Native app sign-in and account sync
+
+Windows and Android use a one-time, five-minute pairing code to connect to an existing Veyra account. From the app's Google sign-in button, Veyra opens the system browser at the real Veyra site; sign in there with email or Google, then approve the device. Google OAuth returns to the pairing page, and the app exchanges the approved code for its own MariaDB-backed session. The browser keeps its normal web session. Android stores the app token with Android Keystore-backed secure storage; Windows encrypts it with Electron `safeStorage`. Both apps attach that session to API requests, so they access the same account and MariaDB data as the website without copying browser cookies.
+
+The Google OAuth client is a Web application. Its redirect URI remains `APP_URL/api/auth/google/callback`; no Android package redirect URI or Google SDK client is needed for this browser-based flow. Private message inserts are sent through scoped Supabase Realtime topics with the new message row, so the receiving chat can render it immediately without refetching an entire history page. Typing presence expires automatically if a device disconnects before sending a stop-typing update.
+
 ### Email delivery with Sequenzy
 
 Create and verify a sending domain in Sequenzy, create a company API key with `transactional:send`, then set `SEQUENZY_API_KEY` in the API runtime environment. Set `APP_URL` to the public Veyra origin. The API sends verification and password reset links directly through Sequenzy's transactional endpoint; Supabase SMTP and Auth settings are not involved. See [Sequenzy's transactional email API](https://docs.sequenzy.com/concepts/transactional-emails).

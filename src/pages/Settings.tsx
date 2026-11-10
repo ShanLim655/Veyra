@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import { apiFetch } from "@/lib/nativeSession";
 import { useAuth } from "@/hooks/useAuth";
 import { useTheme } from "@/components/ThemeProvider";
 import { Button } from "@/components/ui/button";
@@ -153,9 +154,8 @@ export default function Settings() {
     if (exceedsMaxUploadSize(data)) {
       throw new Error(`Maximum file size is ${MAX_UPLOAD_SIZE_LABEL}.`);
     }
-    const signResponse = await fetch('/api/storage/profile-upload', {
+    const signResponse = await apiFetch('/api/storage/profile-upload', {
       method: 'POST',
-      credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ bucket, contentType, size: data.size }),
     });

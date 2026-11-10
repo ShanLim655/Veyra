@@ -7,6 +7,7 @@ interface PresenceState {
   user_id: string;
   online_at: string;
   typing_in?: string;
+  typing_until?: number;
 }
 
 export function usePresence(conversationId: string | null) {
@@ -14,6 +15,8 @@ export function usePresence(conversationId: string | null) {
   const [onlineUsers, setOnlineUsers] = useState<Set<string>>(new Set());
   const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const typingExpiryRef = useRef(new Map<string, number>());
+  const trackQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     if (!user || !conversationId) return;
@@ -26,19 +29,22 @@ export function usePresence(conversationId: string | null) {
         const state = channel.presenceState();
         const online = new Set<string>();
         const typing = new Set<string>();
+        const expiry = new Map<string, number>();
 
         Object.values(state).forEach((presences: any) => {
           presences.forEach((presence: PresenceState) => {
             if (presence.user_id !== user.id) {
               online.add(presence.user_id);
-              if (presence.typing_in === conversationId) {
+              if (presence.typing_in === conversationId && (presence.typing_until || 0) > Date.now()) {
                 typing.add(presence.user_id);
+                expiry.set(presence.user_id, Math.max(expiry.get(presence.user_id) || 0, presence.typing_until || 0));
               }
             }
           });
         });
 
         setOnlineUsers(online);
+        typingExpiryRef.current = expiry;
         setTypingUsers(typing);
       })
       .subscribe(async (status) => {
@@ -46,11 +52,23 @@ export function usePresence(conversationId: string | null) {
           await channel.track({
             user_id: user.id,
             online_at: new Date().toISOString(),
+            typing_until: 0,
           });
         }
       });
 
+    const expiryTimer = window.setInterval(() => {
+      const now = Date.now();
+      setTypingUsers((previous) => {
+        const current = new Set([...previous].filter((id) => (typingExpiryRef.current.get(id) || 0) > now));
+        if (current.size !== previous.size) return current;
+        return previous;
+      });
+    }, 1000);
+
     return () => {
+      window.clearInterval(expiryTimer);
+      typingExpiryRef.current.clear();
       if (channelRef.current === channel) channelRef.current = null;
       supabase.removeChannel(channel);
     };
@@ -61,11 +79,16 @@ export function usePresence(conversationId: string | null) {
       const channel = channelRef.current;
       if (!user || !conversationId || !channel) return;
 
-      await channel.track({
+      const payload = {
         user_id: user.id,
         online_at: new Date().toISOString(),
         typing_in: isTyping ? conversationId : null,
+        typing_until: isTyping ? Date.now() + 5000 : 0,
+      };
+      trackQueueRef.current = trackQueueRef.current.catch(() => undefined).then(async () => {
+        if (channelRef.current === channel) await channel.track(payload);
       });
+      await trackQueueRef.current;
     },
     [user, conversationId]
   );

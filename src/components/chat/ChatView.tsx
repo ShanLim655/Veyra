@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useLayoutEffect, useMemo } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { apiFetch } from "@/lib/nativeSession";
 import { useAuth } from "@/hooks/useAuth";
 import { useUserRole } from "@/hooks/useUserRole";
 import { usePresence } from "@/hooks/usePresence";
@@ -76,7 +77,7 @@ import { GroupSettingsDialog } from "@/components/chat/GroupSettingsDialog";
 
 const EXPIRED_ATTACHMENT_IMG = "/expired-attachment.png";
 async function uploadChatMedia(bucket: "chat-images" | "chat-videos" | "chat-voice", path: string, file: Blob) {
-  const response = await fetch("/api/storage/chat-upload", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bucket, path, contentType: file.type || "application/octet-stream", size: file.size }) });
+  const response = await apiFetch("/api/storage/chat-upload", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bucket, path, contentType: file.type || "application/octet-stream", size: file.size }) });
   const signed = await response.json() as { path?: string; token?: string; publicUrl?: string; error?: string };
   if (!response.ok || !signed.path || !signed.token || !signed.publicUrl) throw new Error(signed.error || "Could not prepare the media upload.");
   const { error } = await supabase.storage.from(bucket).uploadToSignedUrl(signed.path, signed.token, file, { contentType: file.type || "application/octet-stream", cacheControl: "31536000, immutable" });
@@ -138,6 +139,7 @@ type MariaDbRefreshPayload = {
   actor_id?: string;
   keys?: Record<string, string | number>;
   columns?: string[];
+  record?: Record<string, unknown>;
 };
 
 type AttachmentKind = 'image' | 'video' | 'music' | 'file';
@@ -543,6 +545,52 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
 
               if (change.keys?.id && change.eventType !== 'INSERT'
                 && !messagesRef.current.some((message) => message.id === change.keys.id)) return;
+
+              if (change.eventType === 'INSERT' && change.record?.id && change.table === messagesTable) {
+                const received = {
+                  ...change.record,
+                  reactions: [],
+                  _status: 'sent' as const,
+                } as Message;
+                setMessages((previous) => previous.some((message) => message.id === received.id)
+                  ? previous
+                  : [...previous, received]);
+                void Promise.all([
+                  received.sender_id
+                    ? supabase.from('profiles').select('username, display_name, avatar_url').eq('id', received.sender_id).single()
+                    : Promise.resolve({ data: null }),
+                  received.reply_to_id
+                    ? (supabase as any).from(messagesTable).select('id, content, sender_id').eq('id', received.reply_to_id).maybeSingle()
+                    : Promise.resolve({ data: null }),
+                  signMessageMedia(received.image_url),
+                ]).then(async ([senderResult, replyResult, signedImageUrl]) => {
+                  let repliedMessage: Message['replied_message'];
+                  if (replyResult.data) {
+                    const replySenderResult = replyResult.data.sender_id
+                      ? await supabase.from('profiles').select('username, display_name').eq('id', replyResult.data.sender_id).single()
+                      : { data: null };
+                    repliedMessage = { ...replyResult.data, sender: replySenderResult.data || undefined };
+                  }
+                  setMessages((previous) => previous.map((message) => message.id === received.id
+                    ? {
+                      ...message,
+                      image_url: signedImageUrl,
+                      sender: senderResult.data || undefined,
+                      replied_message: repliedMessage,
+                    }
+                    : message));
+                }).catch((error) => console.warn('Could not enrich live message:', error));
+                const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+                if (viewport && viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 250) {
+                  setTimeout(() => scrollToBottom('smooth'), 60);
+                }
+                if (isDM && received.sender_id !== user?.id && user) {
+                  void supabase.rpc('mark_message_delivered', { _message_id: received.id });
+                  if (!document.hidden) void markAsRead(received.id);
+                  else pendingReadMessages.current.add(received.id);
+                }
+                return;
+              }
 
               const columns = change.columns as string[] | undefined;
               const receiptOnly = change.table === 'messages'

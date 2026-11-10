@@ -7,6 +7,11 @@ const SAFE_KEYS = new Set([
   'sender_id', 'receiver_id', 'blocker_id', 'blocked_id', 'group_id',
 ]);
 const publicTables = new Set(['global_messages', 'announcement_messages']);
+const messageTables = new Set(['messages', 'global_messages', 'announcement_messages']);
+const MESSAGE_EVENT_COLUMNS = new Set([
+  'id', 'conversation_id', 'sender_id', 'content', 'image_url', 'reply_to_id',
+  'created_at', 'read_at', 'delivered_at', 'edited_at', 'is_pinned', 'pinned_at', 'pinned_by', 'expires_at',
+]);
 const warnedMissingConfig = { value: false };
 
 function serviceKey() {
@@ -137,6 +142,9 @@ export async function publishMariaDbChanges(changes, actorId) {
         keys: scope.keys,
         columns: change.columns || cleanColumns(change.values),
         ...(scope.isPublic ? {} : { actor_id: actorId }),
+        ...(messageTables.has(change.table) && (change.eventType || '').toUpperCase() === 'INSERT'
+          ? { record: Object.fromEntries(Object.entries(Array.isArray(change.data) ? change.data[0] || {} : change.data || {}).filter(([column]) => MESSAGE_EVENT_COLUMNS.has(column))) }
+          : {}),
         refresh: true,
       };
       const topics = scope.isPublic ? [PUBLIC_TOPIC] : scope.users.map(mariaDbRealtimeTopic);

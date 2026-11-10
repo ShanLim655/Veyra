@@ -1,4 +1,5 @@
 import { supabase } from "@/integrations/supabase/client";
+import { apiFetch } from "@/lib/nativeSession";
 
 export type AdminAction = 
   | "role_change"
@@ -21,7 +22,7 @@ export async function logAdminAction(
   details?: LogDetails
 ): Promise<boolean> {
   try {
-    const currentUser = await fetch('/api/auth/me', { credentials: 'same-origin' }).then((response) => response.ok ? response.json() : null);
+    const currentUser = await apiFetch('/api/auth/me').then((response) => response.ok ? response.json() : null);
     if (!currentUser?.user) {
       console.error("No authenticated user for admin log");
       return false;

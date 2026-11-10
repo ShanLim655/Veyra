@@ -1,3 +1,5 @@
+import { apiFetch } from '@/lib/nativeSession';
+
 type Filter = { column: string; op: string; value: unknown };
 type QueryResult = { data: unknown; error: { message: string } | null; count: number | null };
 type QueryPayload = {
@@ -18,7 +20,7 @@ type QueryPayload = {
 
 async function request(body: Record<string, unknown>): Promise<QueryResult> {
   try {
-    const response = await fetch('/api/data', {
+    const response = await apiFetch('/api/data', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
@@ -84,7 +86,7 @@ export function fromMariaDB(table: string) { return new MariaQuery(table); }
 
 export async function rpcMariaDB(name: string, args?: Record<string, unknown>) {
   try {
-    const response = await fetch('/api/rpc', {
+    const response = await apiFetch('/api/rpc', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },

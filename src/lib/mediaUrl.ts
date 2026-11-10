@@ -1,5 +1,7 @@
 import { supabase } from "@/integrations/supabase/client";
 
+import { apiFetch } from '@/lib/nativeSession';
+
 const CHAT_BUCKETS = ["chat-images", "chat-videos", "chat-voice"];
 const DEFAULT_EXPIRES_IN_SECONDS = 60 * 60 * 6; // 6 hours
 const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
@@ -88,8 +90,8 @@ export async function signChatUrl(
   if (inFlight) return inFlight;
 
   const request = (async () => {
-    const response = await fetch('/api/storage/chat-read', {
-      method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+    const response = await apiFetch('/api/storage/chat-read', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ bucket: parsed.bucket, path: parsed.path }),
     });
     const result = await response.json() as { url?: string };
@@ -152,3 +154,4 @@ export async function signMessageMedia(
 
   return JSON.stringify(signed);
 }
+

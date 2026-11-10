@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell, dialog } = require('electron');
+const { app, BrowserWindow, shell, dialog, ipcMain, safeStorage } = require('electron');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -9,7 +9,33 @@ const { pipeline } = require('node:stream/promises');
 const APP_URL = 'https://veyra-pink-mu.vercel.app';
 const APP_ORIGIN = new URL(APP_URL).origin;
 const RELEASE_METADATA = 'https://github.com/ShanLim655/Veyra/releases/latest/download/latest.json';
+const SESSION_PATH = path.join(app.getPath('userData'), 'session.dat');
 let updateInstalling = false;
+
+function readSessionToken() {
+  if (!safeStorage.isEncryptionAvailable()) return null;
+  try {
+    return safeStorage.decryptString(fs.readFileSync(SESSION_PATH));
+  } catch {
+    return null;
+  }
+}
+
+ipcMain.handle('veyra:get-session-token', () => readSessionToken());
+ipcMain.handle('veyra:set-session-token', (_event, token) => {
+  if (typeof token !== 'string' || token.length < 32 || token.length > 512) throw new Error('Invalid Veyra session token.');
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable.');
+  fs.mkdirSync(path.dirname(SESSION_PATH), { recursive: true });
+  fs.writeFileSync(SESSION_PATH, safeStorage.encryptString(token));
+});
+ipcMain.handle('veyra:clear-session-token', () => {
+  try { fs.unlinkSync(SESSION_PATH); } catch {}
+});
+ipcMain.handle('veyra:open-external', async (_event, target) => {
+  const url = new URL(String(target));
+  if (url.origin !== APP_ORIGIN || url.protocol !== 'https:') throw new Error('Only Veyra sign-in links can be opened.');
+  await shell.openExternal(url.toString());
+});
 
 function compareVersions(left, right) {
   const parse = (value) => String(value).replace(/^v/, '').split('.').map((part) => Number.parseInt(part, 10));
@@ -51,6 +77,7 @@ function createWindow() {
     backgroundColor: '#0b0b0b',
     autoHideMenuBar: true,
     webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,

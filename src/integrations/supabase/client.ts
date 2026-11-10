@@ -1,12 +1,13 @@
 import type { Database } from './types';
 import { authClient } from './client-core';
+import { apiFetch } from '@/lib/nativeSession';
 import { fromMariaDB, rpcMariaDB } from './data-api';
 import { subscribeMariaDbChanges, type ChangeFilter, type MariaDbChangeCallback } from './mariadb-realtime';
 
 async function sendNotificationTest() {
   try {
-    const response = await fetch('/api/notifications/test', {
-      method: 'POST', credentials: 'same-origin',
+    const response = await apiFetch('/api/notifications/test', {
+      method: 'POST',
     });
     const data = await response.json() as { ok?: boolean; error?: string | null };
     return response.ok ? { data, error: null } : { data: null, error: { message: data.error || 'Notification failed.' } };
