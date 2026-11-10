@@ -191,7 +191,7 @@ export async function authenticateRequest(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Authentication required.' });
   try {
     const [rows] = await pool.execute(
-      `SELECT u.id, u.email, u.email_verified_at, p.username, p.display_name
+      `SELECT u.id, u.email, u.email_verified_at, p.username, p.display_name, p.avatar_url
        FROM auth_sessions s JOIN auth_users u ON u.id = s.user_id
        JOIN profiles p ON p.id = u.id
        WHERE s.token_hash = ? AND s.expires_at > UTC_TIMESTAMP(3) AND u.email_verified_at IS NOT NULL LIMIT 1`,

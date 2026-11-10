@@ -5,6 +5,7 @@ export type VeyraUser = {
   email: string;
   username: string;
   display_name: string;
+  avatar_url?: string | null;
   user_metadata: { username: string; display_name: string };
 };
 
