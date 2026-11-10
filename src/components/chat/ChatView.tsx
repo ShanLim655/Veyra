@@ -171,6 +171,15 @@ const MESSAGES_PER_PAGE = 30;
 
 export function ChatView({ conversationId: conversationIdProp, onBack, isMobile = false, channel = "dm", isActive = true }: ChatViewProps) {
   const { user } = useAuth();
+  const ownSenderProfile = useMemo(() => {
+    if (!user) return undefined;
+    const username = user.username || user.user_metadata?.username || user.email.split("@")[0] || "You";
+    return {
+      username,
+      display_name: user.display_name || user.user_metadata?.display_name || username,
+      avatar_url: user.avatar_url || null,
+    };
+  }, [user]);
   const { isAdmin, isSuperAdmin } = useUserRole();
   const { isBlocked, blockedIds } = useBlockedUsers();
   const [revealedBlocked, setRevealedBlocked] = useState<Set<string>>(new Set());
@@ -216,25 +225,15 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   }, [isAnnouncements, isGlobal, isActive, user?.id]);
 
 
-  // Fetch viewer's own username (used for @mention highlighting + detection)
+  // The authenticated user already includes the profile username, so use it
+  // immediately instead of waiting for another profile request.
   useEffect(() => {
     if (!user?.id) {
       setMyUsername(null);
       return;
     }
-    let cancelled = false;
-    supabase
-      .from("profiles")
-      .select("username")
-      .eq("id", user.id)
-      .maybeSingle()
-      .then(({ data }) => {
-        if (!cancelled && data?.username) setMyUsername(data.username);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [user?.id]);
+    setMyUsername(ownSenderProfile?.username || null);
+  }, [user?.id, ownSenderProfile?.username]);
 
   const { typingUsers, setTyping } = usePresence(isDM ? conversationIdProp ?? null : null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -394,7 +393,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     }
 
     // Fetch sender profiles
-    const senderIds = [...new Set((data || []).map((m: any) => m.sender_id).filter(Boolean))] as string[];
+    const senderIds = [...new Set((data || []).map((m: any) => m.sender_id).filter((id: string | null) => id && id !== user?.id))] as string[];
     const { data: profiles } = senderIds.length > 0
       ? await supabase.from("profiles").select("id, username, display_name, avatar_url").in("id", senderIds)
       : { data: [] };
@@ -402,7 +401,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
 
     const pinnedWithSenders = (data || []).map((msg: any) => ({
       ...msg,
-      sender: msg.sender_id ? profilesMap.get(msg.sender_id) : undefined,
+      sender: msg.sender_id === user?.id ? ownSenderProfile : msg.sender_id ? profilesMap.get(msg.sender_id) : undefined,
     }));
 
     setPinnedMessages(pinnedWithSenders as Message[]);
@@ -626,13 +625,16 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
               if (change.eventType === 'INSERT' && change.record?.id && change.table === messagesTable) {
                 const received = {
                   ...change.record,
+                  sender: change.record.sender_id === user?.id ? ownSenderProfile : undefined,
                   reactions: [],
                   _status: 'sent' as const,
                 } as Message;
                 reconcileLiveMessage(received);
                 void Promise.all([
                   received.sender_id
-                    ? supabase.from('profiles').select('username, display_name, avatar_url').eq('id', received.sender_id).single()
+                    ? received.sender_id === user?.id
+                      ? Promise.resolve({ data: ownSenderProfile })
+                      : supabase.from('profiles').select('username, display_name, avatar_url').eq('id', received.sender_id).single()
                     : Promise.resolve({ data: null }),
                   received.reply_to_id
                     ? (supabase as any).from(messagesTable).select('id, content, sender_id').eq('id', received.reply_to_id).maybeSingle()
@@ -688,12 +690,16 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
             if (payload.eventType === "INSERT") {
               const newMsg = payload.new as Message;
               if (newMsg.sender_id) {
-                const { data: sender } = await supabase
-                  .from("profiles")
-                  .select("username, display_name, avatar_url")
-                  .eq("id", newMsg.sender_id)
-                  .single();
-                newMsg.sender = sender || undefined;
+                if (newMsg.sender_id === user?.id) {
+                  newMsg.sender = ownSenderProfile;
+                } else {
+                  const { data: sender } = await supabase
+                    .from("profiles")
+                    .select("username, display_name, avatar_url")
+                    .eq("id", newMsg.sender_id)
+                    .single();
+                  newMsg.sender = sender || undefined;
+                }
               }
               // Fetch replied message data if exists
               if (newMsg.reply_to_id) {
@@ -825,7 +831,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
         supabase.removeChannel(reactionsChannel);
       };
     }
-  }, [conversationId, conversationIdProp, isDM, supportsPinning, messagesTable, showReceipts, user, isActive, reconcileLiveMessage]);
+  }, [conversationId, conversationIdProp, isDM, supportsPinning, messagesTable, showReceipts, user, isActive, ownSenderProfile, reconcileLiveMessage]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     const viewport = scrollAreaRef.current?.querySelector(
@@ -1137,7 +1143,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     setHasMore((data || []).length === MESSAGES_PER_PAGE);
 
     const messageIds = (data || []).map((m: any) => m.id);
-    const senderIds = [...new Set((data || []).map((m: any) => m.sender_id).filter(Boolean))] as string[];
+    const senderIds = [...new Set((data || []).map((m: any) => m.sender_id).filter((id: string | null) => id && id !== user?.id))] as string[];
     const replyToIds = [...new Set((data || []).map((m: any) => m.reply_to_id).filter(Boolean))] as string[];
 
     // These reads are independent; issue them together instead of making each
@@ -1162,7 +1168,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     const repliedMessages = repliedResult.data;
 
     // Fetch sender profiles for replied messages
-    const replySenderIds = [...new Set(((repliedMessages || []) as any[]).map((m: any) => m.sender_id).filter(Boolean))] as string[];
+    const replySenderIds = [...new Set(((repliedMessages || []) as any[]).map((m: any) => m.sender_id).filter((id: string | null) => id && id !== user?.id))] as string[];
     const { data: replyProfiles } = replySenderIds.length > 0
       ? await supabase
           .from("profiles")
@@ -1177,7 +1183,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     }));
 
     const messagesWithSenders = await Promise.all((data || []).map(async (msg: any) => {
-      const sender = msg.sender_id ? profilesMap.get(msg.sender_id) : undefined;
+      const sender = msg.sender_id === user?.id ? ownSenderProfile : msg.sender_id ? profilesMap.get(msg.sender_id) : undefined;
       const repliedMessage = msg.reply_to_id ? repliedMessagesMap.get(msg.reply_to_id) : undefined;
       const signedImageUrl = await signMessageMedia(msg.image_url);
       return {
@@ -1185,7 +1191,10 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
         image_url: signedImageUrl,
         sender: sender ? { username: sender.username, display_name: sender.display_name, avatar_url: sender.avatar_url } : undefined,
         reactions: reactionsMap[msg.id] || [],
-        replied_message: repliedMessage,
+        replied_message: repliedMessage ? {
+          ...repliedMessage,
+          sender: repliedMessage.sender_id === user?.id ? ownSenderProfile : repliedMessage.sender,
+        } : undefined,
         _status: !showReceipts
           ? ("sent" as const)
           : msg.read_at
@@ -1386,6 +1395,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
           display_name: replyTarget.sender.display_name,
         } : undefined,
       } : undefined,
+      sender: ownSenderProfile,
       _status: "sending",
     };
 
