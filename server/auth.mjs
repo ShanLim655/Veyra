@@ -173,7 +173,8 @@ async function createSession(userId, res) {
 }
 
 export async function authenticateRequest(req, res, next) {
-  const token = cookieValue(req, COOKIE);
+  const authorization = String(req.headers.authorization || '');
+  const token = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : cookieValue(req, COOKIE);
   if (!token) return res.status(401).json({ error: 'Authentication required.' });
   try {
     const [rows] = await pool.execute(
@@ -190,6 +191,56 @@ export async function authenticateRequest(req, res, next) {
 }
 
 export function registerAuthRoutes(app) {
+  app.post('/api/auth/native/pair/start', async (req, res) => {
+    const clientId = String(req.body?.clientId || '');
+    if (!['android', 'desktop'].includes(clientId)) return res.status(400).json({ error: 'Unsupported app type.' });
+    const code = randomToken();
+    const id = randomUUID();
+    await pool.execute(
+      'INSERT INTO auth_native_codes (id, code_hash, client_id, expires_at) VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 5 MINUTE))',
+      [id, hashToken(code), clientId],
+    );
+    res.json({ code, approveUrl: `${APP_URL}/pair?code=${encodeURIComponent(code)}`, expiresIn: 300 });
+  });
+
+  app.post('/api/auth/native/pair/approve', authenticateRequest, async (req, res) => {
+    const code = String(req.body?.code || '');
+    const [result] = await pool.execute(
+      'UPDATE auth_native_codes SET user_id = ? WHERE code_hash = ? AND user_id IS NULL AND consumed_at IS NULL AND expires_at > UTC_TIMESTAMP(3)',
+      [req.user.id, hashToken(code)],
+    );
+    if (!result.affectedRows) return res.status(400).json({ error: 'Pairing code is invalid, expired, or already approved.' });
+    res.json({ ok: true });
+  });
+
+  app.post('/api/auth/native/exchange', async (req, res) => {
+    const code = String(req.body?.code || '');
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [rows] = await connection.execute(
+        'SELECT id, user_id, client_id FROM auth_native_codes WHERE code_hash = ? AND consumed_at IS NULL AND expires_at > UTC_TIMESTAMP(3) LIMIT 1 FOR UPDATE',
+        [hashToken(code)],
+      );
+      if (!rows.length || !rows[0].user_id) {
+        await connection.rollback();
+        return res.status(400).json({ error: 'Pairing code is invalid, expired, or not approved yet.' });
+      }
+      const token = randomToken();
+      await connection.execute(
+        'INSERT INTO auth_sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(3), INTERVAL ? DAY))',
+        [randomUUID(), rows[0].user_id, hashToken(token), SESSION_DAYS],
+      );
+      await connection.execute('UPDATE auth_native_codes SET consumed_at = UTC_TIMESTAMP(3) WHERE id = ?', [rows[0].id]);
+      const [users] = await connection.execute('SELECT id, email FROM auth_users WHERE id = ? LIMIT 1', [rows[0].user_id]);
+      await connection.commit();
+      res.json({ token, clientId: rows[0].client_id, user: users[0] });
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally { connection.release(); }
+  });
+
   app.get('/api/auth/google', (req, res) => {
     if (!allowRequest(req, res, 'google-auth', 20)) return;
     const clientId = process.env.GOOGLE_CLIENT_ID;

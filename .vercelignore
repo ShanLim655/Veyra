@@ -1,0 +1,5 @@
+desktop/
+.github/
+release/
+capacitor.config.ts
+android/

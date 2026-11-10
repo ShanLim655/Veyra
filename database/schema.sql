@@ -33,6 +33,19 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
   CONSTRAINT fk_auth_sessions_user FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS auth_native_codes (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  code_hash CHAR(64) NOT NULL UNIQUE,
+  client_id VARCHAR(64) NOT NULL,
+  user_id CHAR(36) NULL,
+  expires_at DATETIME(3) NOT NULL,
+  consumed_at DATETIME(3) NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_auth_native_codes_expiry (expires_at),
+  KEY idx_auth_native_codes_user (user_id),
+  CONSTRAINT fk_auth_native_codes_user FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS auth_email_tokens (
   id CHAR(36) NOT NULL PRIMARY KEY,
   user_id CHAR(36) NOT NULL,

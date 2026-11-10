@@ -2,6 +2,8 @@
 
 Veyra is a real-time messaging app built with React, Vite, TypeScript, Tailwind CSS, and shadcn/ui. It supports private and group chats, global chat, announcements, profiles, moderation, media sharing, voice messages, polls, mentions, reactions, and notifications.
 
+Desktop and Android installers are built and released through GitHub Actions. See [Releases.md](Releases.md) for versioning, publishing, signing, and update behavior.
+
 ## Architecture
 
 - **MariaDB** stores the 19 messaging and product data tables plus the authentication tables for users, sessions, email tokens, and Google identities.
