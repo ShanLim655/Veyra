@@ -103,6 +103,17 @@ export async function callRpc(userId, name, args = {}) {
     case 'leave_group': return leaveGroup(userId, args._conv);
     case 'mark_message_read': return markMessage(userId, args._message_id, 'read_at');
     case 'mark_message_delivered': return markMessage(userId, args._message_id, 'delivered_at');
+    case 'mark_conversation_read': {
+      const [result] = await pool.execute(
+        `UPDATE messages m
+         JOIN conversation_members cm ON cm.conversation_id = m.conversation_id
+         SET m.read_at = CURRENT_TIMESTAMP(3),
+             m.delivered_at = COALESCE(m.delivered_at, CURRENT_TIMESTAMP(3))
+         WHERE m.conversation_id = ? AND cm.user_id = ? AND m.sender_id <> ? AND m.read_at IS NULL`,
+        [args._conversation_id, userId, userId],
+      );
+      return result.affectedRows;
+    }
     case 'mark_conversation_delivered': {
       const [result] = await pool.execute('UPDATE messages m JOIN conversation_members cm ON cm.conversation_id = m.conversation_id SET m.delivered_at = CURRENT_TIMESTAMP(3) WHERE m.conversation_id = ? AND cm.user_id = ? AND m.sender_id <> ? AND m.delivered_at IS NULL', [args._conversation_id, userId, userId]);
       return result.affectedRows;
