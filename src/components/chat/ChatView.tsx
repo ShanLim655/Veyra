@@ -554,7 +554,8 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                 } as Message;
                 setMessages((previous) => previous.some((message) => message.id === received.id)
                   ? previous
-                  : [...previous, received]);
+                  : [...previous, received].sort((left, right) =>
+                    new Date(left.created_at).getTime() - new Date(right.created_at).getTime()));
                 void Promise.all([
                   received.sender_id
                     ? supabase.from('profiles').select('username, display_name, avatar_url').eq('id', received.sender_id).single()

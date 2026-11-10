@@ -7,6 +7,7 @@ import { purgeExpiredAttachments } from './maintenance.mjs';
 import { authenticateRequest, registerAuthRoutes } from './auth.mjs';
 import { changesFromRpc, changeFromDataRequest, mariaDbRealtimeTopic, publishMariaDbChanges } from './realtime.mjs';
 import { getSupabaseAdmin } from './supabase-admin.mjs';
+import { invalidateReadCache } from './redis.mjs';
 
 const MAX_PROFILE_IMAGE_BYTES = 25 * 1024 * 1024;
 const PROFILE_UPLOAD_TYPES = new Set(['image/jpeg', 'image/gif']);
@@ -61,7 +62,10 @@ export function createApp() {
       const args = req.body?.args || {};
       const data = await callRpc(req.user.id, name, args);
       const changes = changesFromRpc(name, args, data);
-      if (changes.length) await publishMariaDbChanges(changes, req.user.id);
+      if (changes.length) {
+        await Promise.all([...new Set(changes.map((change) => change.table))].map(invalidateReadCache));
+        await publishMariaDbChanges(changes, req.user.id);
+      }
       res.json({ data });
     }
     catch (error) {
