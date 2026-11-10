@@ -10,6 +10,7 @@ on:
       - 'android/**'
       - 'package.json'
       - 'package-lock.json'
+      - 'scripts/**'
       - '.github/workflows/android-apk.yml'
   pull_request:
     branches: [main]
@@ -19,6 +20,7 @@ on:
       - 'android/**'
       - 'package.json'
       - 'package-lock.json'
+      - 'scripts/**'
       - '.github/workflows/android-apk.yml'
 
 permissions:
@@ -44,6 +46,7 @@ jobs:
       - run: npm run build
       - run: npx cap add android
       - run: npx cap sync android
+      - run: node scripts/configure-android-deeplink.mjs
       - run: chmod +x android/gradlew && android/gradlew -p android assembleDebug
       - uses: actions/upload-artifact@v4
         with:

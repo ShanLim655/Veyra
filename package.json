@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@capacitor/android": "^7.6.10",
+    "@capacitor/app": "^7.1.2",
     "@capacitor/browser": "^7.0.5",
     "@capacitor/core": "^7.6.10",
     "@fontsource/inter": "^5.2.8",
@@ -111,6 +112,12 @@
   "build": {
     "appId": "chat.veyra.desktop",
     "productName": "Veyra",
+    "protocols": [
+      {
+        "name": "Veyra device pairing",
+        "schemes": ["veyra"]
+      }
+    ],
     "directories": {
       "output": "release"
     },

@@ -6,6 +6,9 @@ import "@fontsource/inter/600.css";
 import "@fontsource/inter/700.css";
 import App from "./App.tsx";
 import "./index.css";
+import { initializeNativePairCallbacks } from "@/lib/nativePairing";
+
+void initializeNativePairCallbacks();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

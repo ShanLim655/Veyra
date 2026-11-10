@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { authRequest, notifyAuthChanged } from "@/lib/authApi";
 import { isNativeVeyraApp, openSystemBrowser, setNativeSessionToken } from "@/lib/nativeSession";
+import { clearNativePair, markNativePairComplete, registerNativePair } from "@/lib/nativePairing";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -103,8 +104,8 @@ export default function Auth() {
           description: "If an account exists for this email, a reset link has been sent.",
         });
         resetCaptcha();
-      } catch (error: any) {
-        toast({ title: "Error", description: error.message, variant: "destructive" });
+      } catch (error: unknown) {
+        toast({ title: "Error", description: error instanceof Error ? error.message : "Could not send the reset email.", variant: "destructive" });
         resetCaptcha();
       } finally {
         setLoading(false);
@@ -150,10 +151,10 @@ export default function Auth() {
         });
         resetCaptcha();
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       toast({
         title: "Error",
-        description: error.message,
+        description: error instanceof Error ? error.message : "Authentication failed.",
         variant: "destructive",
       });
       resetCaptcha();
@@ -165,6 +166,7 @@ export default function Auth() {
   const handleGoogleSignIn = async () => {
     setLoading(true);
     setGoogleProgress('');
+    let pairingCode: string | null = null;
     try {
       if (!isNativeVeyraApp()) {
         const query = returnTo !== '/' ? `?returnTo=${encodeURIComponent(returnTo)}` : '';
@@ -176,6 +178,8 @@ export default function Auth() {
       const pairing = await authRequest<{ code: string; approveUrl: string; expiresIn: number }>(
         'native/pair/start', { clientId },
       );
+      pairingCode = pairing.code;
+      registerNativePair(pairing.code);
       setGoogleProgress('Finish sign-in in your browser, then approve this device.');
       await openSystemBrowser(pairing.approveUrl);
 
@@ -187,6 +191,7 @@ export default function Auth() {
         if (result.token) {
           if (result.clientId !== clientId) throw new Error('This pairing request belongs to a different Veyra app.');
           await setNativeSessionToken(result.token);
+          markNativePairComplete(pairing.code);
           notifyAuthChanged();
           toast({ title: 'Signed in', description: 'This app is now connected to your Veyra account.' });
           navigate('/');
@@ -202,10 +207,17 @@ export default function Auth() {
         variant: 'destructive',
       });
     } finally {
+      if (pairingCode) clearNativePair(pairingCode);
       setLoading(false);
       setGoogleProgress('');
     }
   };
+
+  useEffect(() => {
+    const handleNativePairComplete = () => navigate('/');
+    window.addEventListener('veyra-native-pair-complete', handleNativePairComplete);
+    return () => window.removeEventListener('veyra-native-pair-complete', handleNativePairComplete);
+  }, [navigate]);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-background p-4">

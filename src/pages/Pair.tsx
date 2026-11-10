@@ -15,8 +15,15 @@ export default function Pair() {
   const approve = async () => {
     setError('');
     try {
-      await authRequest('native/pair/approve', { code });
+      const result = await authRequest<{ ok: boolean; clientId: string }>('native/pair/approve', { code });
       setDone(true);
+      if (result.clientId !== 'android' && result.clientId !== 'desktop') {
+        throw new Error('This pairing request is for an unsupported Veyra app.');
+      }
+      const callback = new URL('veyra://pair');
+      callback.searchParams.set('code', code);
+      callback.searchParams.set('clientId', result.clientId);
+      window.location.assign(callback.toString());
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not approve this device.');
     }
@@ -28,7 +35,7 @@ export default function Pair() {
         <CardHeader>
           <CardTitle>{done ? 'Device paired' : 'Pair a Veyra app'}</CardTitle>
           <CardDescription>
-            {done ? 'Return to Veyra. This page can now be closed.' : 'Approve this one-time request to sign in to your Veyra app.'}
+            {done ? 'Returning you to Veyra. Your app will finish signing in securely.' : 'Approve this one-time request to sign in to your Veyra app.'}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">

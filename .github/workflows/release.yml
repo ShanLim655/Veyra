@@ -56,6 +56,7 @@ jobs:
         env:
           VITE_APP_VERSION: ${{ github.ref_name }}
       - run: npx cap add android && npx cap sync android
+      - run: node scripts/configure-android-deeplink.mjs
       - name: Configure signing and version
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}

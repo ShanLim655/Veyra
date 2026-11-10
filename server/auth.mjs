@@ -213,7 +213,7 @@ export function registerAuthRoutes(app) {
       'INSERT INTO auth_native_codes (id, code_hash, client_id, expires_at) VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 5 MINUTE))',
       [id, hashToken(code), clientId],
     );
-    res.json({ code, clientId, approveUrl: `${APP_URL}/pair?code=${encodeURIComponent(code)}`, expiresIn: 300 });
+    res.json({ code, clientId, approveUrl: `${APP_URL}/pair?code=${encodeURIComponent(code)}&clientId=${encodeURIComponent(clientId)}`, expiresIn: 300 });
   });
 
   app.post('/api/auth/native/pair/approve', authenticateRequest, async (req, res) => {
@@ -223,7 +223,8 @@ export function registerAuthRoutes(app) {
       [req.user.id, hashToken(code)],
     );
     if (!result.affectedRows) return res.status(400).json({ error: 'Pairing code is invalid, expired, or already approved.' });
-    res.json({ ok: true });
+    const [rows] = await pool.execute('SELECT client_id FROM auth_native_codes WHERE code_hash = ? LIMIT 1', [hashToken(code)]);
+    res.json({ ok: true, clientId: rows[0]?.client_id });
   });
 
   app.post('/api/auth/native/exchange', async (req, res) => {
@@ -287,7 +288,6 @@ export function registerAuthRoutes(app) {
       redirect_uri: redirectUri,
       response_type: 'code',
       scope: 'openid email profile',
-      prompt: 'select_account',
       state,
       code_challenge: challenge,
       code_challenge_method: 'S256',
@@ -312,8 +312,8 @@ export function registerAuthRoutes(app) {
         errorUrl.searchParams.set('error', 'google_access_denied');
         return res.redirect(302, errorUrl.toString());
       }
-      if (!expectedState || !verifier || !timingSafeStringEqual(expectedState, req.query.state)) return authRedirect(res, 'google_state_invalid');
-      if (!req.query.code) return authRedirect(res, 'google_auth_failed');
+      if (!expectedState || !verifier || !timingSafeStringEqual(expectedState, req.query.state)) return authRedirect(res, 'google_state_invalid', returnTo);
+      if (!req.query.code) return authRedirect(res, 'google_auth_failed', returnTo);
 
       const redirectUri = `${APP_URL}/api/auth/google/callback`;
       const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
@@ -345,7 +345,7 @@ export function registerAuthRoutes(app) {
       return res.redirect(302, `${APP_URL}${returnTo}`);
     } catch (error) {
       console.error('Google OAuth callback failed:', error);
-      return authRedirect(res, 'google_auth_failed');
+      return authRedirect(res, 'google_auth_failed', returnTo);
     }
   });
 

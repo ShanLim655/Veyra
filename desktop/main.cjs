@@ -11,6 +11,54 @@ const APP_ORIGIN = new URL(APP_URL).origin;
 const RELEASE_METADATA = 'https://github.com/ShanLim655/Veyra/releases/latest/download/latest.json';
 const SESSION_PATH = path.join(app.getPath('userData'), 'session.dat');
 let updateInstalling = false;
+let mainWindow = null;
+const queuedPairCallbacks = [];
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (hasSingleInstanceLock) {
+  const initialPairCallback = process.argv.map(getPairCallback).find(Boolean);
+  if (initialPairCallback) queuedPairCallbacks.push(initialPairCallback);
+}
+
+function getPairCallback(value) {
+  try {
+    const url = new URL(String(value));
+    return url.protocol === 'veyra:' && url.hostname === 'pair' && url.searchParams.has('code') ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function deliverPairCallback(value) {
+  const url = getPairCallback(value);
+  if (!url) return;
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading()) {
+    queuedPairCallbacks.push(url);
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+  mainWindow.webContents.send('veyra:pair-callback', url);
+}
+
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_event, commandLine) => {
+    const pairUrl = commandLine.map(getPairCallback).find(Boolean);
+    if (pairUrl) deliverPairCallback(pairUrl);
+    else if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+
+  app.on('open-url', (event, url) => {
+    event.preventDefault();
+    deliverPairCallback(url);
+  });
+}
 
 function readSessionToken() {
   if (!safeStorage.isEncryptionAvailable()) return null;
@@ -83,6 +131,10 @@ function createWindow() {
       sandbox: true,
     },
   });
+  mainWindow = window;
+  window.webContents.once('did-finish-load', () => {
+    while (queuedPairCallbacks.length) window.webContents.send('veyra:pair-callback', queuedPairCallbacks.shift());
+  });
 
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https://')) void shell.openExternal(url);
@@ -95,6 +147,8 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  if (!hasSingleInstanceLock) return;
+  if (!app.isDefaultProtocolClient('veyra')) app.setAsDefaultProtocolClient('veyra');
   await updateBeforeLaunch();
   if (updateInstalling) return;
   createWindow();
