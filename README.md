@@ -11,7 +11,7 @@ Desktop and Android installers are built and released through GitHub Actions. Se
 - **Sequenzy** sends account verification and password reset emails through its transactional API.
 - **Supabase Storage** stores avatars, banners, chat images, videos, and voice messages.
 - **Node.js** API and MariaDB power accounts and application data. The API can run on a server or as a Vercel Function.
-- **Supabase Realtime** carries presence and lightweight, member-scoped MariaDB change notices. Clients fetch actual data from the authenticated MariaDB API; the API does not poll the database on a timer.
+- **Supabase Realtime** carries presence and lightweight, member-scoped MariaDB change notices. Redis provides short-lived authenticated read caching, request coalescing, and a bounded retry queue for change notices; MariaDB remains the permanent source of truth.
 
 MariaDB, Google OAuth, and Sequenzy credentials stay on the server. The browser uses Supabase for Storage, presence, and receiving scoped change notices.
 
@@ -53,7 +53,11 @@ Copy `.env.example` to `.env.local` and set `MARIADB_*` values. `.env.local` is 
 
 Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` for Storage reads and Realtime. `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are server-only; the service key creates signed avatar/banner uploads and sends MariaDB change broadcasts, and also supports expired-object cleanup. Set `APP_URL` to the public app origin and `SEQUENZY_API_KEY` to a Sequenzy company API key with `transactional:send` permission. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in the API runtime environment to enable Google sign-in. Never put database, Google, or Sequenzy credentials in a `VITE_*` variable.
 
-The message path does not need Redis: live refreshes use Supabase Realtime broadcasts instead of polling. Layerbase Redis Free also has a 20-connection cap and sleeps when idle, so it would add another cold-starting service rather than fix MariaDB's own wake-up time.
+Set `REDIS_URL` in `.env.local` and the production API environment to enable Redis. Veyra accepts `redis://` for Redis endpoints without TLS. Redis is optional and best-effort: MariaDB remains authoritative, Realtime notices are retried from a bounded Redis Stream, and missed messages are recovered from MariaDB when chat history loads. Cache entries are user and query scoped, expire quickly, and are invalidated after table writes. If Redis is unavailable, reads and broadcasts fall back to the existing MariaDB and Supabase paths. Typing and presence continue to use Supabase Realtime, which already provides connected-client presence and disconnect cleanup without exposing Redis credentials to browsers.
+
+Redis read caching is restricted to results up to 256 KB and expires after two seconds. Each table has a generation key so a write invalidates older cached results across API instances. In-flight identical reads are coalesced per warm function instance; user ID and the complete query payload are part of the key, preserving authorization and pagination boundaries. Do not enable Redis eviction policies that can evict the stream outbox before acknowledged events are sent; MariaDB history still repairs missed live events.
+
+See [Redis operations and configuration](docs/redis.md) for connection setup, fallback behavior, and capacity notes.
 
 In Supabase Dashboard:
 

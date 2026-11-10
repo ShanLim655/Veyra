@@ -2,6 +2,7 @@ import express from 'express';
 import { fileURLToPath } from 'node:url';
 import { pool } from './db.mjs';
 import { createApp } from './app.mjs';
+import { closeRedis } from './redis.mjs';
 
 const port = Number(process.env.PORT || 3001);
 const app = createApp();
@@ -11,5 +12,5 @@ if (process.env.NODE_ENV === 'production') {
 }
 app.listen(port, '127.0.0.1', () => console.log(`Veyra API listening on port ${port}.`));
 for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, async () => { await pool.end(); process.exit(0); });
+  process.on(signal, async () => { await Promise.allSettled([pool.end(), closeRedis()]); process.exit(0); });
 }

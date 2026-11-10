@@ -1,5 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { pool } from './db.mjs';
+import { acknowledgeRealtimeBatch, enqueueRealtimeBatch, pendingRealtimeBatches } from './redis.mjs';
 
 const PUBLIC_TOPIC = 'veyra-public-mariadb';
 const SAFE_KEYS = new Set([
@@ -156,16 +157,32 @@ export async function publishMariaDbChanges(changes, actorId) {
   }
   if (!messages.length) return;
 
-  try {
-    const response = await fetch(`${url.replace(/\/$/, '')}/realtime/v1/api/broadcast`, {
+  const broadcast = async (batch) => {
+    try {
+      const response = await fetch(`${url.replace(/\/$/, '')}/realtime/v1/api/broadcast`, {
       method: 'POST',
       headers: { apikey: key, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages }),
+      body: JSON.stringify({ messages: batch }),
       signal: AbortSignal.timeout(1500),
-    });
-    if (!response.ok) console.warn(`MariaDB live update broadcast failed (${response.status}).`);
-  } catch (error) {
-    console.warn('MariaDB live update broadcast failed:', error instanceof Error ? error.message : 'network error');
+      });
+      if (!response.ok) console.warn(`MariaDB live update broadcast failed (${response.status}).`);
+      return response.ok;
+    } catch (error) {
+      console.warn('MariaDB live update broadcast failed:', error instanceof Error ? error.message : 'network error');
+      return false;
+    }
+  };
+
+  const queuedId = await enqueueRealtimeBatch(messages);
+  if (!queuedId) {
+    await broadcast(messages);
+    return;
+  }
+
+  const pending = await pendingRealtimeBatches(50);
+  for (const batch of pending) {
+    if (!(await broadcast(batch.messages))) break;
+    await acknowledgeRealtimeBatch(batch.id);
   }
 }
 

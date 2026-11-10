@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { pool } from './db.mjs';
 import { ensureDirectMessage } from './rpc.mjs';
 import { notifyNewMessage } from './notifications.mjs';
+import { cachedRead, invalidateReadCache } from './redis.mjs';
 
 const TABLES = new Set([
   'admin_logs', 'announcement_messages', 'blocked_users', 'conversation_members',
@@ -194,7 +195,7 @@ function selection(select, columns) {
   return value.split(',').map((part) => identifier(part.trim(), columns)).join(', ');
 }
 
-export async function queryData(userId, payload) {
+async function queryDataUncached(userId, payload) {
   const { table, operation = 'select' } = payload || {};
   const columns = await columnsFor(table);
   if (!['select', 'insert', 'update', 'delete', 'upsert'].includes(operation)) throw new Error('Unsupported operation.');
@@ -294,6 +295,17 @@ export async function queryData(userId, payload) {
     await pool.execute(`DELETE FROM \`${table}\` WHERE id IN (${ids.map(() => '?').join(',')})`, ids);
     return { data: before, count: ids.length, realtimeRows: rows };
   }
+}
+
+export async function queryData(userId, payload) {
+  const table = payload?.table;
+  const operation = payload?.operation || 'select';
+  if (operation === 'select') {
+    return cachedRead(userId, table, payload, () => queryDataUncached(userId, payload));
+  }
+  const result = await queryDataUncached(userId, payload);
+  if (result?.count > 0) await invalidateReadCache(table);
+  return result;
 }
 
 async function canInsert(table, row, userId, access) {
