@@ -1,0 +1,97 @@
+name: Publish Veyra release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Set release version
+        shell: bash
+        run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version
+      - run: npm run desktop:build -- --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: release/Veyra*.exe
+          if-no-files-found: error
+
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - run: npm ci
+      - name: Set release version
+        shell: bash
+        run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version
+      - run: npm run build
+        env:
+          VITE_APP_VERSION: ${{ github.ref_name }}
+      - run: npx cap add android && npx cap sync android
+      - name: Configure signing and version
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+          ANDROID_VERSION_CODE: ${{ github.run_number }}
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/veyra-release.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/veyra-release.jks" >> "$GITHUB_ENV"
+          node scripts/configure-android-release.mjs
+      - run: chmod +x android/gradlew && android/gradlew -p android assembleRelease
+      - name: Name APK
+        shell: bash
+        run: cp android/app/build/outputs/apk/release/app-release.apk "AndroidVeyra${GITHUB_REF_NAME#v}.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-installer
+          path: AndroidVeyra*.apk
+          if-no-files-found: error
+
+  publish:
+    needs: [build-windows, build-android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Create release metadata
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          VERSION="${RELEASE_VERSION#v}"
+          cat > release-assets/latest.json <<EOF
+          {"version":"$VERSION","tag":"$RELEASE_VERSION","windows":{"file":"Veyra$VERSION.exe","url":"https://github.com/$REPOSITORY/releases/download/$RELEASE_VERSION/Veyra$VERSION.exe"},"android":{"file":"AndroidVeyra$VERSION.apk","url":"https://github.com/$REPOSITORY/releases/download/$RELEASE_VERSION/AndroidVeyra$VERSION.apk"}}
+          EOF
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" release-assets/* --title "Veyra ${TAG#v}" --generate-notes

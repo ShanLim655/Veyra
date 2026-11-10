@@ -1,7 +1,9 @@
 {
   "name": "vite_react_shadcn_ts",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "Veyra desktop messaging app",
+  "author": "Veyra",
   "engines": {
     "node": ">=20"
   },
@@ -21,6 +23,7 @@
   },
   "dependencies": {
     "@capacitor/android": "^7.6.10",
+    "@capacitor/browser": "^7.0.5",
     "@capacitor/core": "^7.6.10",
     "@fontsource/inter": "^5.2.8",
     "@hcaptcha/react-hcaptcha": "^2.0.2",
@@ -129,6 +132,7 @@
       "perMachine": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
-    }
+    },
+    "artifactName": "Veyra${version}.${ext}"
   }
 }

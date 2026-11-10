@@ -5,6 +5,7 @@ on:
   push:
     branches: [main, 'codex/**']
     paths:
+      - 'src/**'
       - 'capacitor.config.ts'
       - 'android/**'
       - 'package.json'
@@ -13,6 +14,7 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - 'src/**'
       - 'capacitor.config.ts'
       - 'android/**'
       - 'package.json'
