@@ -165,3 +165,19 @@ The `supabase/migrations/` and `supabase/functions/` directories contain histori
 | `/announcements` | Announcement channel |
 | `/settings` | Profile, account, privacy, and notifications |
 | `/admin` | Admin and moderation dashboard |
+
+---
+
+## Acknowledgements
+
+# MASSIVE MASSIVE THANK YOU TO [LysaKrysa](https://github.com/LysaKrysa)
+
+Veyra would not exist in its current form without **[Chatt](https://github.com/LysaKrysa/Chatt)** and the generosity of its creator, **[LysaKrysa](https://github.com/LysaKrysa)**, for making the project open source.
+
+Chatt was the starting point that made Veyra possible. Having access to the source gave me something real to learn from, build upon, rethink, and turn into a project of my own. It helped turn an idea into something I could actually work on, and eventually grow into Veyra.
+
+I’m genuinely grateful for the time, effort, and work that went into creating Chatt and sharing it with everyone. Open-source projects like this make it possible for other developers to learn, experiment, create, and take ideas further. That generosity deserves recognition.
+
+**Thank you, LysaKrysa, for open-sourcing Chatt and helping make Veyra possible.** This project is here in large part because you chose to share your work. I truly appreciate it.
+
+Please go check out the original project: **[LysaKrysa/Chatt](https://github.com/LysaKrysa/Chatt)**.
