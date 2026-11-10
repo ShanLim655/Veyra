@@ -226,6 +226,7 @@ const RPC_CHANGES = {
   ],
   mark_message_read: (args) => [{ table: 'messages', eventType: 'UPDATE', operation: 'rpc', values: { id: args._message_id }, columns: ['read_at'] }],
   mark_message_delivered: (args) => [{ table: 'messages', eventType: 'UPDATE', operation: 'rpc', values: { id: args._message_id }, columns: ['delivered_at'] }],
+  mark_conversation_read: (args, result) => result > 0 ? [{ table: 'messages', eventType: 'UPDATE', operation: 'rpc', values: { conversation_id: args._conversation_id }, columns: ['read_at', 'delivered_at'] }] : [],
   mark_conversation_delivered: (args) => [{ table: 'messages', eventType: 'UPDATE', operation: 'rpc', values: { conversation_id: args._conversation_id }, columns: ['delivered_at'] }],
   finalize_poll: (args) => [{ table: 'polls', eventType: 'UPDATE', operation: 'rpc', values: { id: args._poll_id }, columns: ['closed_at'] }],
 };

@@ -353,10 +353,16 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   const wasActiveRef = useRef(isActive);
   const userScrolledRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const pendingReadMessages = useRef<Set<string>>(new Set());
+  const pendingOutgoingMessagesRef = useRef(new Map<string, {
+    content: string;
+    reply_to_id: string | null;
+    image_url: string | null;
+    created_at: number;
+  }>());
   const messageRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const realtimeRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const receiptRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const receiptWriteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const swipeStateRef = useRef<{ messageId: string; startX: number; active: boolean } | null>(null);
 
   const scrollToMessage = useCallback((messageId: string) => {
@@ -497,7 +503,9 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
 
   const refreshReceiptStatuses = useCallback(async () => {
     if (!showReceipts || messagesTable !== 'messages') return;
-    const messageIds = messagesRef.current.map((message) => message.id);
+    const messageIds = messagesRef.current
+      .filter((message) => message.sender_id === user?.id && !message.read_at)
+      .map((message) => message.id);
     if (!messageIds.length) return;
     const { data } = await supabase
       .from('messages')
@@ -505,17 +513,86 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       .in('id', messageIds);
     if (!data) return;
     const receipts = new Map(data.map((message: any) => [message.id, message]));
-    setMessages((previous) => previous.map((message) => {
-      const receipt = receipts.get(message.id) as { read_at: string | null; delivered_at: string | null } | undefined;
-      if (!receipt) return message;
-      return {
-        ...message,
-        read_at: receipt.read_at,
-        delivered_at: receipt.delivered_at,
-        _status: receipt.read_at ? 'read' : receipt.delivered_at ? 'delivered' : 'sent',
-      };
-    }));
-  }, [messagesTable, showReceipts]);
+    setMessages((previous) => {
+      let changed = false;
+      const next = previous.map((message) => {
+        const receipt = receipts.get(message.id) as { read_at: string | null; delivered_at: string | null } | undefined;
+        if (!receipt) return message;
+        if (receipt.read_at === message.read_at && receipt.delivered_at === message.delivered_at) return message;
+        changed = true;
+        return {
+          ...message,
+          read_at: receipt.read_at,
+          delivered_at: receipt.delivered_at,
+          _status: receipt.read_at ? 'read' : receipt.delivered_at ? 'delivered' : 'sent',
+        };
+      });
+      return changed ? next : previous;
+    });
+  }, [messagesTable, showReceipts, user?.id]);
+
+  const reconcileLiveMessage = useCallback((incoming: Message, matchImageUrl = incoming.image_url || null) => {
+    const now = Date.now();
+    let optimisticId: string | undefined;
+    if (incoming.sender_id === user?.id && !messagesRef.current.some((message) => message.id === incoming.id)) {
+      for (const [id, pending] of pendingOutgoingMessagesRef.current) {
+        if (now - pending.created_at > 120_000) {
+          pendingOutgoingMessagesRef.current.delete(id);
+          continue;
+        }
+        if (pending.content === incoming.content
+          && pending.reply_to_id === (incoming.reply_to_id || null)
+          && pending.image_url === matchImageUrl) {
+          optimisticId = id;
+          pendingOutgoingMessagesRef.current.delete(id);
+          break;
+        }
+      }
+    }
+
+    setMessages((previous) => {
+      const existingIndex = previous.findIndex((message) => message.id === incoming.id);
+      if (existingIndex >= 0) {
+        const existing = previous[existingIndex];
+        const next = previous.slice();
+        next[existingIndex] = {
+          ...incoming,
+          ...existing,
+          sender: existing.sender || incoming.sender,
+          replied_message: existing.replied_message || incoming.replied_message,
+          image_url: existing.image_url || incoming.image_url,
+          reactions: existing.reactions?.length ? existing.reactions : incoming.reactions || [],
+          _status: existing._status === 'sending' ? 'sent' : existing._status || 'sent',
+        };
+        return next;
+      }
+
+      const optimisticIndex = optimisticId
+        ? previous.findIndex((message) => message.id === optimisticId)
+        : -1;
+      if (optimisticIndex >= 0) {
+        const optimistic = previous[optimisticIndex];
+        const next = previous.slice();
+        next[optimisticIndex] = {
+          ...optimistic,
+          ...incoming,
+          image_url: optimistic.image_url || incoming.image_url,
+          reactions: optimistic.reactions || incoming.reactions || [],
+          replied_message: optimistic.replied_message || incoming.replied_message,
+          _status: 'sent',
+        };
+        return next.sort((left, right) =>
+          new Date(left.created_at).getTime() - new Date(right.created_at).getTime());
+      }
+
+      if (!previous.length || new Date(previous[previous.length - 1].created_at) <= new Date(incoming.created_at)) {
+        return [...previous, incoming];
+      }
+      const next = [...previous, incoming];
+      return next.sort((left, right) =>
+        new Date(left.created_at).getTime() - new Date(right.created_at).getTime());
+    });
+  }, [user?.id]);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -552,10 +629,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                   reactions: [],
                   _status: 'sent' as const,
                 } as Message;
-                setMessages((previous) => previous.some((message) => message.id === received.id)
-                  ? previous
-                  : [...previous, received].sort((left, right) =>
-                    new Date(left.created_at).getTime() - new Date(right.created_at).getTime()));
+                reconcileLiveMessage(received);
                 void Promise.all([
                   received.sender_id
                     ? supabase.from('profiles').select('username, display_name, avatar_url').eq('id', received.sender_id).single()
@@ -584,11 +658,6 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                 const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
                 if (viewport && viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 250) {
                   setTimeout(() => scrollToBottom('smooth'), 60);
-                }
-                if (isDM && received.sender_id !== user?.id && user) {
-                  void supabase.rpc('mark_message_delivered', { _message_id: received.id });
-                  if (!document.hidden) void markAsRead(received.id);
-                  else pendingReadMessages.current.add(received.id);
                 }
                 return;
               }
@@ -648,16 +717,9 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                 }
               }
               newMsg.reactions = [];
+              const rawImageUrl = newMsg.image_url || null;
               newMsg.image_url = await signMessageMedia(newMsg.image_url);
-              setMessages((prev) => {
-                const exists = prev.some((m) => m.id === newMsg.id);
-                if (exists) {
-                  return prev.map((m) =>
-                    m.id === newMsg.id ? { ...newMsg, _status: "sent" as const } : m
-                  );
-                }
-                return [...prev, { ...newMsg, _status: "sent" as const }];
-              });
+              reconcileLiveMessage({ ...newMsg, _status: "sent" }, rawImageUrl);
               // Scroll to bottom only if user is already near the bottom
               setTimeout(() => {
                 const v = scrollAreaRef.current?.querySelector(
@@ -669,15 +731,6 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                 if (nearBottom || isOwn) scrollToBottom("smooth");
               }, 100);
 
-              if (isDM && newMsg.sender_id !== user?.id && user) {
-                // Always mark as delivered immediately on receipt
-                supabase.rpc("mark_message_delivered", { _message_id: newMsg.id });
-                if (!document.hidden) {
-                  markAsRead(newMsg.id);
-                } else {
-                  pendingReadMessages.current.add(newMsg.id);
-                }
-              }
               if (isAnnouncements && isActive && user?.id) {
                 void markAnnouncementsRead(user.id)
                   .then(() => window.dispatchEvent(new CustomEvent("announcements-read")))
@@ -772,7 +825,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
         supabase.removeChannel(reactionsChannel);
       };
     }
-  }, [conversationId, conversationIdProp, isDM, supportsPinning, messagesTable, showReceipts, user, isActive]);
+  }, [conversationId, conversationIdProp, isDM, supportsPinning, messagesTable, showReceipts, user, isActive, reconcileLiveMessage]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     const viewport = scrollAreaRef.current?.querySelector(
@@ -858,6 +911,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     // so the UI never flashes empty while the network fetch is in flight.
     const cached = getCachedMessages<Message>(conversationId);
     setMessages(cached && cached.length > 0 ? cached : []);
+    pendingOutgoingMessagesRef.current.clear();
     setOtherUser(null);
     setHasMore(true);
     setReplyingTo(null);
@@ -907,34 +961,30 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
   }, []);
 
-  // Mark pending messages as read when tab becomes visible
   useEffect(() => {
-    if (isTabVisible && pendingReadMessages.current.size > 0) {
-      pendingReadMessages.current.forEach((id) => markAsRead(id));
-      pendingReadMessages.current.clear();
-    }
-  }, [isTabVisible]);
+    if (!isDM || !conversationIdProp || !user || messages.length === 0) return;
+    const incoming = messages.filter((message) => message.sender_id !== user.id);
+    const needsRead = isTabVisible && incoming.some((message) => !message.read_at);
+    const needsDelivery = incoming.some((message) => !message.delivered_at);
+    if ((!needsRead && !needsDelivery) || receiptWriteTimerRef.current) return;
 
-  useEffect(() => {
-    if (isDM && conversationIdProp && user && messages.length > 0) {
-      // Bulk-mark every incoming message as delivered as soon as we have them loaded
-      supabase.rpc("mark_conversation_delivered", { _conversation_id: conversationIdProp });
-      const unreadMessages = messages.filter(
-        (m) => m.sender_id !== user.id && !m.read_at
-      );
-      unreadMessages.forEach((m) => {
-        if (isTabVisible) {
-          markAsRead(m.id);
-        } else {
-          pendingReadMessages.current.add(m.id);
-        }
+    const conversationToSync = conversationIdProp;
+    receiptWriteTimerRef.current = setTimeout(() => {
+      receiptWriteTimerRef.current = null;
+      if (activeConversationRef.current !== conversationToSync) return;
+      const latestIncoming = messagesRef.current.filter((message) => message.sender_id !== user.id);
+      const canMarkRead = !document.hidden && latestIncoming.some((message) => !message.read_at);
+      const rpc = canMarkRead ? "mark_conversation_read" : "mark_conversation_delivered";
+      if (!latestIncoming.some((message) => !message.delivered_at) && !canMarkRead) return;
+      void supabase.rpc(rpc, { _conversation_id: conversationToSync }).then(({ error }) => {
+        if (error) console.warn(`Could not update conversation receipts (${rpc}):`, error.message);
       });
-    }
+    }, 80);
   }, [isDM, conversationIdProp, user, messages, isTabVisible]);
 
-  const markAsRead = async (messageId: string) => {
-    await supabase.rpc("mark_message_read", { _message_id: messageId });
-  };
+  useEffect(() => () => {
+    if (receiptWriteTimerRef.current) clearTimeout(receiptWriteTimerRef.current);
+  }, []);
 
   // Keep group header in sync when membership / name changes elsewhere.
   useEffect(() => {
@@ -1339,6 +1389,12 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       _status: "sending",
     };
 
+    pendingOutgoingMessagesRef.current.set(tempId, {
+      content: contentToSend,
+      reply_to_id: replyTarget?.id || null,
+      image_url: imageUrlJson || null,
+      created_at: Date.now(),
+    });
     setMessages((prev) => [...prev, optimisticMessage]);
 
     const insertPayload: any = {
@@ -1355,13 +1411,27 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       .single();
 
     if (error) {
+      pendingOutgoingMessagesRef.current.delete(tempId);
       console.error("Error sending message:", error);
       toast({ title: "Error sending message", description: error.message, variant: "destructive" });
-      setMessages((prev) => prev.filter((m) => m.id !== tempId));
+      setMessages((prev) => prev.some((message) => message.id === tempId)
+        ? prev.filter((message) => message.id !== tempId)
+        : prev);
     } else {
-      setMessages((prev) =>
-        prev.map((m) => (m.id === tempId ? { ...m, ...data, image_url: optimisticImageUrl ?? data.image_url, reactions: [], _status: "sent" as const } : m))
-      );
+      pendingOutgoingMessagesRef.current.delete(tempId);
+      setMessages((prev) => {
+        const index = prev.findIndex((message) => message.id === tempId);
+        if (index < 0) return prev;
+        const next = prev.slice();
+        next[index] = {
+          ...prev[index],
+          ...data,
+          image_url: optimisticImageUrl ?? data.image_url,
+          reactions: [],
+          _status: "sent",
+        };
+        return next;
+      });
     }
     setLoading(false);
   };
@@ -1525,9 +1595,10 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     }
   };
 
-  const getStatusIcon = (message: Message, isOwn: boolean) => {
+  const getStatusIcon = (message: Message, isOwn: boolean, showReadStatus = true) => {
     if (!isOwn) return null;
     if (!showReceipts) return null;
+    if (message._status === "read" && !showReadStatus) return null;
 
     switch (message._status) {
       case "sending":
@@ -1941,6 +2012,11 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
           )}
           {(() => messages.map((message, index) => {
             const isOwn = message.sender_id === user?.id;
+            const nextMessage = messages[index + 1];
+            const continuesReadChain = message._status === "read"
+              && nextMessage?.sender_id === message.sender_id
+              && nextMessage._status === "read"
+              && new Date(nextMessage.created_at).getTime() - new Date(message.created_at).getTime() <= 5 * 60 * 1000;
             const isEditing = editingMessageId === message.id;
             const groupedReactions = groupReactions(message.reactions || []);
 
@@ -2192,7 +2268,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                               (edited)
                             </span>
                           )}
-                          {isOwn && getStatusIcon(message, isOwn)}
+                          {isOwn && getStatusIcon(message, isOwn, !continuesReadChain)}
                         </div>
 
 
