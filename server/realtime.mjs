@@ -131,10 +131,31 @@ export async function publishMariaDbChanges(changes, actorId) {
   }
 
   const membershipCache = new Map();
+  const senderProfiles = new Map();
   const messages = [];
   try {
     for (const change of changes) {
       const scope = await recipientsFor(change, actorId, membershipCache);
+      let record;
+      if (messageTables.has(change.table) && (change.eventType || '').toUpperCase() === 'INSERT') {
+        const source = Array.isArray(change.data) ? change.data[0] || {} : change.data || {};
+        record = Object.fromEntries(Object.entries(source).filter(([column]) => MESSAGE_EVENT_COLUMNS.has(column)));
+        if (typeof record.sender_id === 'string') {
+          if (!senderProfiles.has(record.sender_id)) {
+            const [profiles] = await pool.execute(
+              'SELECT username, display_name, avatar_url FROM profiles WHERE id = ? LIMIT 1',
+              [record.sender_id],
+            );
+            senderProfiles.set(record.sender_id, profiles[0] ? {
+              username: profiles[0].username,
+              display_name: profiles[0].display_name,
+              avatar_url: profiles[0].avatar_url,
+            } : null);
+          }
+          const sender = senderProfiles.get(record.sender_id);
+          if (sender) record.sender = sender;
+        }
+      }
       const payload = {
         schema: 'public',
         table: change.table,
@@ -143,9 +164,7 @@ export async function publishMariaDbChanges(changes, actorId) {
         keys: scope.keys,
         columns: change.columns || cleanColumns(change.values),
         ...(scope.isPublic ? {} : { actor_id: actorId }),
-        ...(messageTables.has(change.table) && (change.eventType || '').toUpperCase() === 'INSERT'
-          ? { record: Object.fromEntries(Object.entries(Array.isArray(change.data) ? change.data[0] || {} : change.data || {}).filter(([column]) => MESSAGE_EVENT_COLUMNS.has(column))) }
-          : {}),
+        ...(record ? { record } : {}),
         refresh: true,
       };
       const topics = scope.isPublic ? [PUBLIC_TOPIC] : scope.users.map(mariaDbRealtimeTopic);
