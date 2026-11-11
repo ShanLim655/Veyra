@@ -21,12 +21,15 @@ function compareVersions(left, right) {
   return 0;
 }
 
-function isReleaseAssetUrl(value) {
+function isReleaseAssetUrl(value, version) {
   try {
     const url = new URL(String(value));
+    if (!isReleaseVersion(version)) return false;
     return url.protocol === 'https:'
       && url.hostname === 'github.com'
-      && url.pathname.startsWith('/ShanLim655/Veyra/releases/download/');
+      && url.pathname === `/ShanLim655/Veyra/releases/download/v${version}/Veyra${version}.exe`
+      && !url.search
+      && !url.hash;
   } catch {
     return false;
   }

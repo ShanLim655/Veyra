@@ -214,7 +214,7 @@ async function checkForUpdate() {
     if (!isReleaseVersion(release.version) || compareVersions(release.version, app.getVersion()) <= 0 || !release.windows?.url) return;
     releaseVersion = release.version;
     const installerUrl = new URL(release.windows.url);
-    if (!isReleaseAssetUrl(installerUrl.toString())) throw new Error('The release metadata contains an unsupported installer URL.');
+    if (!isReleaseAssetUrl(installerUrl.toString(), release.version)) throw new Error('The release metadata contains an unsupported installer URL.');
     updateWindowDismissed = false;
     showUpdateProgress(release.version, 'Preparing download…');
     fs.mkdirSync(UPDATE_DIRECTORY, { recursive: true });

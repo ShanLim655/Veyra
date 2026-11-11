@@ -27,7 +27,8 @@ export function AndroidUpdateCheck() {
         const release = await response.json() as { version?: string; android?: { url?: string } };
         if (cancelled || !/^\d+\.\d+\.\d+$/.test(release.version || '') || !release.android?.url || compareVersions(release.version, INSTALLED_VERSION) <= 0) return;
         const downloadUrl = new URL(release.android.url);
-        if (downloadUrl.protocol !== 'https:' || downloadUrl.hostname !== 'github.com' || !downloadUrl.pathname.startsWith('/ShanLim655/Veyra/releases/download/')) return;
+        const expectedUrl = `https://github.com/ShanLim655/Veyra/releases/download/v${release.version}/AndroidVeyra${release.version}.apk`;
+        if (downloadUrl.toString() !== expectedUrl) return;
         if (!window.confirm(`Veyra ${release.version} is available. Update now?\n\nChoose Cancel to be reminded the next time you open Veyra.`)) return;
         await Browser.open({ url: downloadUrl.toString() });
       } catch (error) {

@@ -17,10 +17,13 @@ test('version comparison handles major, minor, and patch changes', () => {
 });
 
 test('installer URLs must target this repository release assets over HTTPS', () => {
-  assert.equal(isReleaseAssetUrl('https://github.com/ShanLim655/Veyra/releases/download/v1.2.0/VeyraSetup.exe'), true);
-  assert.equal(isReleaseAssetUrl('http://github.com/ShanLim655/Veyra/releases/download/v1.2.0/VeyraSetup.exe'), false);
-  assert.equal(isReleaseAssetUrl('https://github.com/attacker/Other/releases/download/v1.2.0/setup.exe'), false);
-  assert.equal(isReleaseAssetUrl('https://github.com.evil.example/ShanLim655/Veyra/releases/download/v1.2.0/setup.exe'), false);
+  assert.equal(isReleaseAssetUrl('https://github.com/ShanLim655/Veyra/releases/download/v1.2.0/Veyra1.2.0.exe', '1.2.0'), true);
+  assert.equal(isReleaseAssetUrl('http://github.com/ShanLim655/Veyra/releases/download/v1.2.0/Veyra1.2.0.exe', '1.2.0'), false);
+  assert.equal(isReleaseAssetUrl('https://github.com/ShanLim655/Veyra/releases/download/v1.2.0/Veyra1.1.8.exe', '1.2.0'), false);
+  assert.equal(isReleaseAssetUrl('https://github.com/ShanLim655/Veyra/releases/download/v1.1.8/Veyra1.2.0.exe', '1.2.0'), false);
+  assert.equal(isReleaseAssetUrl('https://github.com/attacker/Other/releases/download/v1.2.0/Veyra1.2.0.exe', '1.2.0'), false);
+  assert.equal(isReleaseAssetUrl('https://github.com/ShanLim655/Veyra/releases/download/v1.2.0/Veyra1.2.0.exe?download=1', '1.2.0'), false);
+  assert.equal(isReleaseAssetUrl('https://github.com/ShanLim655/Veyra/releases/download/v1.2.0/Veyra1.2.0.exe', 'v1.2.0'), false);
 });
 
 test('download redirects must end on an approved HTTPS asset host', () => {
