@@ -1,4 +1,5 @@
 import express from 'express';
+import path from 'node:path';
 import { pool } from './db.mjs';
 import { queryData } from './data.mjs';
 import { callRpc } from './rpc.mjs';
@@ -15,7 +16,7 @@ const PROFILE_UPLOAD_TYPES = new Set(['image/jpeg', 'image/gif']);
 const CHAT_UPLOAD_BUCKETS = new Set(['chat-images', 'chat-videos', 'chat-voice']);
 const MAX_CHAT_UPLOAD_BYTES = 25 * 1024 * 1024;
 
-export function createApp() {
+export function createApp({ staticDirectory = null } = {}) {
   const app = express();
   if (process.env.VERCEL === '1') {
     app.set('trust proxy', 1);
@@ -162,6 +163,10 @@ export function createApp() {
     try { res.json(await purgeExpiredAttachments()); }
     catch (error) { res.status(500).json({ error: error.message || 'Attachment cleanup failed.' }); }
   });
+  if (staticDirectory) {
+    app.use(express.static(staticDirectory));
+    app.get(/^\/(?!api(?:\/|$)).*/, (_req, res) => res.sendFile(path.join(staticDirectory, 'index.html')));
+  }
   app.use((error, _req, res, _next) => {
     console.error('API request failed:', error);
     res.status(error.status || 500).json({ error: error.status ? error.message : 'The server could not complete the request.' });
