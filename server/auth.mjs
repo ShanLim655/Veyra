@@ -297,6 +297,7 @@ export function registerAuthRoutes(app) {
 
   app.get('/api/auth/google/callback', async (req, res) => {
     const storedState = cookieValue(req, GOOGLE_STATE_COOKIE);
+    let returnTo = '/';
     res.clearCookie(GOOGLE_STATE_COOKIE, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
@@ -305,7 +306,6 @@ export function registerAuthRoutes(app) {
     });
     try {
       const [expectedState, verifier, encodedReturnTo] = String(storedState || '').split('.');
-      let returnTo = '/';
       try { if (encodedReturnTo) returnTo = safeReturnTo(Buffer.from(encodedReturnTo, 'base64url').toString()); } catch {}
       if (req.query.error) {
         const errorUrl = new URL(`${APP_URL}${returnTo === '/' ? '/auth' : returnTo}`);
@@ -339,7 +339,7 @@ export function registerAuthRoutes(app) {
         throw new Error('Google did not return a verified email address.');
       }
       const email = normalizeEmail(profile.email);
-      if (!email.endsWith('@gmail.com') && !profile.hd) return authRedirect(res, 'google_email_not_supported');
+      if (!email.endsWith('@gmail.com') && !profile.hd) return authRedirect(res, 'google_email_not_supported', returnTo);
       const userId = await createOrVerifyGoogleUser({ ...profile, email });
       await createSession(userId, res);
       return res.redirect(302, `${APP_URL}${returnTo}`);
