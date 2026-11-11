@@ -1,7 +1,7 @@
 {
   "name": "vite_react_shadcn_ts",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.8",
   "description": "Veyra desktop messaging app",
   "author": "Veyra",
   "engines": {
@@ -117,7 +117,9 @@
     "protocols": [
       {
         "name": "Veyra device pairing",
-        "schemes": ["veyra"]
+        "schemes": [
+          "veyra"
+        ]
       }
     ],
     "directories": {

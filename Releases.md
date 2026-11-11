@@ -56,12 +56,12 @@ Metadata shape:
   "version": "1.1.8",
   "tag": "v1.1.8",
   "windows": {
-    "file": "Veyra1.0.0.exe",
-    "url": "https://github.com/OWNER/REPO/releases/download/v1.1.8/Veyra1.0.0.exe"
+    "file": "Veyra1.1.8.exe",
+    "url": "https://github.com/OWNER/REPO/releases/download/v1.1.8/Veyra1.1.8.exe"
   },
   "android": {
-    "file": "AndroidVeyra1.0.0.apk",
-    "url": "https://github.com/OWNER/REPO/releases/download/v1.0.0/AndroidVeyra1.0.0.apk"
+    "file": "AndroidVeyra1.1.8.apk",
+    "url": "https://github.com/OWNER/REPO/releases/download/v1.1.8/AndroidVeyra1.1.8.apk"
   }
 }
 ```
