@@ -14,6 +14,7 @@ test('self-hosted frontend routes serve the SPA without swallowing API 404s', as
   writeFileSync(path.join(directory, 'index.html'), '<!doctype html><title>Veyra test</title>');
   const app = createApp({ staticDirectory: directory });
   const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
   const address = server.address();
   try {
     const root = await fetch(`http://127.0.0.1:${address.port}/`);
