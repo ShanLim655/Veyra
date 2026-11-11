@@ -12,6 +12,7 @@ export type MariaDbChange = {
   actor_id?: string;
   keys: Record<string, string | number>;
   columns: string[];
+  record?: Record<string, unknown>;
   refresh: true;
 };
 export type ChangeFilter = {

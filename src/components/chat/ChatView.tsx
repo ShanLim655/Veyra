@@ -625,7 +625,8 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
               if (change.eventType === 'INSERT' && change.record?.id && change.table === messagesTable) {
                 const received = {
                   ...change.record,
-                  sender: change.record.sender_id === user?.id ? ownSenderProfile : undefined,
+                  sender: (change.record.sender as Message['sender'] | undefined)
+                    || (change.record.sender_id === user?.id ? ownSenderProfile : undefined),
                   reactions: [],
                   _status: 'sent' as const,
                 } as Message;
@@ -639,7 +640,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                   received.reply_to_id
                     ? (supabase as any).from(messagesTable).select('id, content, sender_id').eq('id', received.reply_to_id).maybeSingle()
                     : Promise.resolve({ data: null }),
-                  signMessageMedia(received.image_url),
+                  signMessageMedia(received.image_url).catch(() => received.image_url),
                 ]).then(async ([senderResult, replyResult, signedImageUrl]) => {
                   let repliedMessage: Message['replied_message'];
                   if (replyResult.data) {
@@ -652,7 +653,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                     ? {
                       ...message,
                       image_url: signedImageUrl,
-                      sender: senderResult.data || undefined,
+                      sender: senderResult.data || received.sender,
                       replied_message: repliedMessage,
                     }
                     : message));
