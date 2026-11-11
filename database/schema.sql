@@ -319,3 +319,44 @@ CREATE TABLE IF NOT EXISTS native_push_tokens (
   KEY idx_native_push_tokens_user (user_id),
   CONSTRAINT fk_native_push_profile FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
+CREATE TABLE IF NOT EXISTS background_job_settings (
+  id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
+  enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO background_job_settings (id, enabled) VALUES (1, FALSE)
+ON DUPLICATE KEY UPDATE id = VALUES(id);
+
+CREATE TABLE IF NOT EXISTS background_jobs (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  job_type VARCHAR(100) NOT NULL,
+  payload JSON NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'pending',
+  attempts INT UNSIGNED NOT NULL DEFAULT 0,
+  available_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  locked_until DATETIME(3) NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  completed_at DATETIME(3) NULL,
+  last_error VARCHAR(1000) NULL,
+  KEY idx_background_jobs_pending (status, available_at, created_at),
+  KEY idx_background_jobs_lease (status, locked_until),
+  KEY idx_background_jobs_completed (status, completed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TRIGGER IF NOT EXISTS trg_veyra_message_job AFTER INSERT ON messages
+FOR EACH ROW INSERT INTO background_jobs (id, job_type, payload, status, attempts, available_at)
+SELECT UUID(), 'notification.message.created', JSON_OBJECT('table', 'messages', 'id', NEW.id), 'pending', 0, UTC_TIMESTAMP(3)
+FROM background_job_settings WHERE id = 1 AND enabled = TRUE;
+
+CREATE TRIGGER IF NOT EXISTS trg_veyra_global_message_job AFTER INSERT ON global_messages
+FOR EACH ROW INSERT INTO background_jobs (id, job_type, payload, status, attempts, available_at)
+SELECT UUID(), 'notification.message.created', JSON_OBJECT('table', 'global_messages', 'id', NEW.id), 'pending', 0, UTC_TIMESTAMP(3)
+FROM background_job_settings WHERE id = 1 AND enabled = TRUE;
+
+CREATE TRIGGER IF NOT EXISTS trg_veyra_announcement_job AFTER INSERT ON announcement_messages
+FOR EACH ROW INSERT INTO background_jobs (id, job_type, payload, status, attempts, available_at)
+SELECT UUID(), 'notification.message.created', JSON_OBJECT('table', 'announcement_messages', 'id', NEW.id), 'pending', 0, UTC_TIMESTAMP(3)
+FROM background_job_settings WHERE id = 1 AND enabled = TRUE;

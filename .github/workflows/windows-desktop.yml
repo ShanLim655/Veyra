@@ -1,5 +1,9 @@
 name: Build Windows desktop app
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
 on:
   workflow_dispatch:
   push:

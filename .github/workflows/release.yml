@@ -100,8 +100,10 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           VERSION="${RELEASE_VERSION#v}"
+          WINDOWS_SHA256=$(sha256sum "release-assets/Veyra$VERSION.exe" | awk '{print $1}')
+          ANDROID_SHA256=$(sha256sum "release-assets/AndroidVeyra$VERSION.apk" | awk '{print $1}')
           cat > release-assets/latest.json <<EOF
-          {"version":"$VERSION","tag":"$RELEASE_VERSION","windows":{"file":"Veyra$VERSION.exe","url":"https://github.com/$REPOSITORY/releases/download/$RELEASE_VERSION/Veyra$VERSION.exe"},"android":{"file":"AndroidVeyra$VERSION.apk","url":"https://github.com/$REPOSITORY/releases/download/$RELEASE_VERSION/AndroidVeyra$VERSION.apk"}}
+          {"version":"$VERSION","tag":"$RELEASE_VERSION","windows":{"file":"Veyra$VERSION.exe","url":"https://github.com/$REPOSITORY/releases/download/$RELEASE_VERSION/Veyra$VERSION.exe","sha256":"$WINDOWS_SHA256"},"android":{"file":"AndroidVeyra$VERSION.apk","url":"https://github.com/$REPOSITORY/releases/download/$RELEASE_VERSION/AndroidVeyra$VERSION.apk","sha256":"$ANDROID_SHA256"}}
           EOF
       - name: Publish GitHub Release
         env:

@@ -10,8 +10,12 @@ const templates = {
 
 function safeServer(value) {
   try {
-    const url = new URL((value || DEFAULT_SERVER).replace(/\/+$/, ''));
-    return ['https:', 'http:'].includes(url.protocol) && ALLOWED_HOSTS.some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`));
+    const url = new URL(value);
+    return url.protocol === 'https:'
+      && ALLOWED_HOSTS.includes(url.hostname)
+      && (!url.port || url.port === '443')
+      && !url.username
+      && !url.password;
   } catch { return false; }
 }
 
@@ -19,15 +23,27 @@ function render(template, vars) {
   return String(template || '').replace(/\{(\w+)\}/g, (_match, key) => vars[key] ?? '');
 }
 
-async function publish(server, topic, title, message) {
-  if (!safeServer(server) || !topic?.trim()) return false;
-  try {
-    const response = await fetch(server.replace(/\/+$/, ''), {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topic: topic.trim(), title, message }),
-    });
-    return response.ok;
-  } catch { return false; }
+export async function publish(server, topic, title, message) {
+  const endpoint = typeof server === 'string' && server.trim() ? server.trim().replace(/\/+$/, '') : DEFAULT_SERVER;
+  if (!safeServer(endpoint) || !topic?.trim()) return false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic: topic.trim(), title, message }),
+        signal: AbortSignal.timeout(5000),
+        redirect: 'error',
+      });
+      if (response.ok) return true;
+      if (response.status < 500 && response.status !== 429) return false;
+      if (attempt === 2) console.warn(`Notification server returned ${response.status} after retries.`);
+    } catch (error) {
+      if (attempt === 2) console.warn('Notification delivery failed:', error instanceof Error ? error.message : 'network error');
+    }
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250 * (2 ** attempt)));
+  }
+  return false;
 }
 
 export async function sendTestNotification(userId) {
@@ -50,6 +66,8 @@ export async function notifyNewMessage(table, row) {
   if (!ids.length) return;
   const [prefs] = await pool.execute(`SELECT * FROM notification_preferences WHERE user_id IN (${ids.map(() => '?').join(',')})`, ids);
   const sent = new Set();
+  const digestSubscribers = new Map();
+  let failedDeliveries = 0;
   const channelKey = channel === 'dm' ? `dm:${row.conversation_id}` : channel;
 
   for (const pref of prefs) {
@@ -57,7 +75,6 @@ export async function notifyNewMessage(table, row) {
     const server = pref.ntfy_server || DEFAULT_SERVER;
     const topic = pref.ntfy_topic.trim();
     const dedupeKey = `${server.replace(/\/+$/, '')}|${topic}`;
-    if (sent.has(dedupeKey)) continue;
     const mode = pref[`${channel}_mode`] || 'off';
     if (mode === 'off') continue;
     let title;
@@ -66,16 +83,29 @@ export async function notifyNewMessage(table, row) {
       const [state] = await pool.execute('SELECT last_notified_at FROM notification_digest_state WHERE user_id = ? AND channel_key = ? LIMIT 1', [pref.user_id, channelKey]);
       const cooldownMs = Number(pref.digest_cooldown_minutes || 10) * 60_000;
       if (state[0] && Date.now() - new Date(state[0].last_notified_at).getTime() < cooldownMs) continue;
-      await pool.execute(`INSERT INTO notification_digest_state (user_id, channel_key, last_notified_at) VALUES (?, ?, CURRENT_TIMESTAMP(3)) ON DUPLICATE KEY UPDATE last_notified_at = CURRENT_TIMESTAMP(3)`, [pref.user_id, channelKey]);
+      if (!digestSubscribers.has(dedupeKey)) digestSubscribers.set(dedupeKey, new Set());
+      digestSubscribers.get(dedupeKey).add(pref.user_id);
       title = channel === 'dm' ? 'New messages' : channel === 'global' ? 'New global chat messages' : 'New announcements';
       message = channel === 'dm' ? 'You have new direct messages.' : channel === 'global' ? "There's new activity in Global Chat." : 'There are new announcements.';
     } else {
       const custom = !!pref[`${channel}_custom_enabled`];
       const titleTemplate = custom ? pref[`${channel}_title_template`] : templates[channel].title;
       const bodyTemplate = custom ? pref[`${channel}_body_template`] : templates[channel].body;
-      title = render(titleTemplate, { user: sender, message: row.content || '(no text)' });
-      message = render(bodyTemplate, { user: sender, message: row.content || '(no text)' });
+      title = render(titleTemplate, { user: sender, sender, message: row.content || '(no text)' });
+      message = render(bodyTemplate, { user: sender, sender, message: row.content || '(no text)' });
     }
-    if (await publish(server, topic, title, message)) sent.add(dedupeKey);
+    if (sent.has(dedupeKey)) {
+      if (mode === 'digest') await updateDigestState(pref.user_id, channelKey);
+      continue;
+    }
+    if (await publish(server, topic, title, message)) {
+      sent.add(dedupeKey);
+      for (const userId of digestSubscribers.get(dedupeKey) || []) {
+        await updateDigestState(userId, channelKey);
+      }
+    } else {
+      failedDeliveries++;
+    }
   }
+  if (failedDeliveries) throw new Error(`Notification delivery failed for ${failedDeliveries} destination(s).`);
 }

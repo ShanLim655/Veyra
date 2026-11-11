@@ -38,6 +38,8 @@ interface ChatSearchProps {
   messages: MessageLike[];
   onJump: (messageId: string) => void;
   currentUserId?: string;
+  hasMore?: boolean;
+  onLoadMore?: () => Promise<void>;
 }
 
 const HAS_VALUES = ["file", "image", "video", "music", "link", "attachment"] as const;
@@ -127,11 +129,12 @@ function userMatchesFrom(
   });
 }
 
-export function ChatSearch({ messages, onJump, currentUserId }: ChatSearchProps) {
+export function ChatSearch({ messages, onJump, currentUserId, hasMore = false, onLoadMore }: ChatSearchProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [userPopoverOpen, setUserPopoverOpen] = useState(false);
   const [filterPopoverOpen, setFilterPopoverOpen] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const parsed = useMemo(() => parseQuery(query), [query]);
@@ -221,6 +224,16 @@ export function ChatSearch({ messages, onJump, currentUserId }: ChatSearchProps)
   };
 
   const clear = () => setQuery("");
+
+  const loadOlderMessages = async () => {
+    if (!onLoadMore || loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      await onLoadMore();
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
 
   useEffect(() => {
     if (open) requestAnimationFrame(() => inputRef.current?.focus());
@@ -395,7 +408,7 @@ export function ChatSearch({ messages, onJump, currentUserId }: ChatSearchProps)
           {results.length === 0 ? (
             <div className="p-6 text-center text-sm text-muted-foreground">
               {hasActiveQuery
-                ? "No matching messages in loaded history."
+                ? hasMore ? "No matches in loaded messages yet. Search older messages to continue." : "No matching messages in this conversation."
                 : "Type to search messages."}
             </div>
           ) : (
@@ -450,6 +463,20 @@ export function ChatSearch({ messages, onJump, currentUserId }: ChatSearchProps)
                 );
               })}
             </ul>
+          )}
+          {hasActiveQuery && hasMore && onLoadMore && (
+            <div className="border-t p-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="w-full"
+                disabled={loadingOlder}
+                onClick={() => void loadOlderMessages()}
+              >
+                {loadingOlder ? "Loading older messages…" : "Search older messages"}
+              </Button>
+            </div>
           )}
         </div>
       </PopoverContent>

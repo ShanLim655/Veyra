@@ -19,9 +19,20 @@ export function usePresence(conversationId: string | null) {
   const trackQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
-    if (!user || !conversationId) return;
+    if (!user || !conversationId) {
+      channelRef.current = null;
+      typingExpiryRef.current.clear();
+      setOnlineUsers(new Set());
+      setTypingUsers(new Set());
+      return;
+    }
+
+    setOnlineUsers(new Set());
+    setTypingUsers(new Set());
+    typingExpiryRef.current.clear();
 
     const channel = supabase.channel(`presence:${conversationId}`);
+    let active = true;
     channelRef.current = channel;
 
     channel
@@ -31,7 +42,7 @@ export function usePresence(conversationId: string | null) {
         const typing = new Set<string>();
         const expiry = new Map<string, number>();
 
-        Object.values(state).forEach((presences: any) => {
+        Object.values(state as Record<string, PresenceState[]>).forEach((presences) => {
           presences.forEach((presence: PresenceState) => {
             if (presence.user_id !== user.id) {
               online.add(presence.user_id);
@@ -48,12 +59,21 @@ export function usePresence(conversationId: string | null) {
         setTypingUsers(typing);
       })
       .subscribe(async (status) => {
+        if (!active) return;
         if (status === "SUBSCRIBED") {
-          await channel.track({
-            user_id: user.id,
-            online_at: new Date().toISOString(),
-            typing_until: 0,
-          });
+          try {
+            await channel.track({
+              user_id: user.id,
+              online_at: new Date().toISOString(),
+              typing_until: 0,
+            });
+          } catch (error) {
+            console.warn("Conversation presence tracking failed:", error);
+          }
+        } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+          typingExpiryRef.current.clear();
+          setOnlineUsers(new Set());
+          setTypingUsers(new Set());
         }
       });
 
@@ -67,6 +87,7 @@ export function usePresence(conversationId: string | null) {
     }, 1000);
 
     return () => {
+      active = false;
       window.clearInterval(expiryTimer);
       typingExpiryRef.current.clear();
       if (channelRef.current === channel) channelRef.current = null;
@@ -87,6 +108,8 @@ export function usePresence(conversationId: string | null) {
       };
       trackQueueRef.current = trackQueueRef.current.catch(() => undefined).then(async () => {
         if (channelRef.current === channel) await channel.track(payload);
+      }).catch((error) => {
+        console.warn("Conversation presence update failed:", error);
       });
       await trackQueueRef.current;
     },
@@ -97,53 +120,80 @@ export function usePresence(conversationId: string | null) {
 }
 
 let globalPresenceChannel: ReturnType<typeof supabase.channel> | null = null;
+let globalPresenceUserId: string | null = null;
 let globalOnlineUsersSet = new Set<string>();
-let globalPresenceListeners = new Set<(users: Set<string>) => void>();
+const globalPresenceListeners = new Set<(users: Set<string>) => void>();
+
+function publishGlobalPresence(users: Set<string>) {
+  globalOnlineUsersSet = users;
+  globalPresenceListeners.forEach((listener) => listener(new Set(users)));
+}
+
+async function stopGlobalPresence(channel: ReturnType<typeof supabase.channel>) {
+  if (globalPresenceChannel !== channel || globalPresenceListeners.size > 0) return;
+  globalPresenceChannel = null;
+  globalPresenceUserId = null;
+  publishGlobalPresence(new Set());
+  await supabase.removeChannel(channel);
+}
 
 export function useGlobalPresence() {
   const { user } = useAuth();
   const [onlineUsers, setOnlineUsers] = useState<Set<string>>(globalOnlineUsersSet);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user) {
+      setOnlineUsers(new Set());
+      return;
+    }
+
     const listener = (users: Set<string>) => setOnlineUsers(new Set(users));
     globalPresenceListeners.add(listener);
+
     if (!globalPresenceChannel) {
-      globalPresenceChannel = supabase.channel("global-presence");
+      const channel = supabase.channel("global-presence");
+      globalPresenceChannel = channel;
+      globalPresenceUserId = user.id;
 
-      globalPresenceChannel
+      channel
         .on("presence", { event: "sync" }, () => {
-          const state = globalPresenceChannel!.presenceState();
           const online = new Set<string>();
-
-          Object.values(state).forEach((presences: any) => {
-            presences.forEach((presence: { user_id: string }) => {
-              online.add(presence.user_id);
+          Object.values(channel.presenceState() as Record<string, Array<{ user_id?: string }>>).forEach((presences) => {
+            presences.forEach((presence: { user_id?: string }) => {
+              if (presence.user_id) online.add(presence.user_id);
             });
           });
-
-          globalOnlineUsersSet = online;
-          globalPresenceListeners.forEach((l) => l(online));
+          publishGlobalPresence(online);
         })
         .subscribe(async (status) => {
-          if (status === "SUBSCRIBED") {
-            await globalPresenceChannel!.track({
-              user_id: user.id,
-              online_at: new Date().toISOString(),
-            });
+          if (status === "SUBSCRIBED" && globalPresenceChannel === channel) {
+            try {
+              await channel.track({
+                user_id: user.id,
+                online_at: new Date().toISOString(),
+              });
+            } catch (error) {
+              console.warn("Global presence tracking failed:", error);
+            }
+          }
+          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+            if (globalPresenceChannel === channel) publishGlobalPresence(new Set());
           }
         });
-    } else {
-      globalPresenceChannel.track({
+    } else if (globalPresenceUserId !== user.id) {
+      globalPresenceUserId = user.id;
+      void globalPresenceChannel.track({
         user_id: user.id,
         online_at: new Date().toISOString(),
-      });
+      }).catch((error) => console.warn("Global presence tracking failed:", error));
     }
 
     setOnlineUsers(new Set(globalOnlineUsersSet));
 
     return () => {
       globalPresenceListeners.delete(listener);
+      const channel = globalPresenceChannel;
+      if (channel && globalPresenceListeners.size === 0) void Promise.resolve().then(() => stopGlobalPresence(channel));
     };
   }, [user]);
 

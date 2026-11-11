@@ -40,6 +40,43 @@ async function readyClient() {
 
 const digest = (value) => createHash('sha256').update(value).digest('hex');
 
+const localRateLimits = new Map();
+const RATE_LIMIT_FALLBACK_MAX = 10000;
+const RATE_LIMIT_SCRIPT = "local count = redis.call('INCR', KEYS[1]); if count == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]); end; return count";
+
+function consumeLocalRateLimit(key, limit, windowMs) {
+  const now = Date.now();
+  let bucket = localRateLimits.get(key);
+  if (!bucket || bucket.resetAt <= now) bucket = { count: 0, resetAt: now + windowMs };
+  bucket.count += 1;
+  localRateLimits.set(key, bucket);
+  if (localRateLimits.size > RATE_LIMIT_FALLBACK_MAX) {
+    for (const [entryKey, entry] of localRateLimits) {
+      if (entry.resetAt <= now || localRateLimits.size > RATE_LIMIT_FALLBACK_MAX) localRateLimits.delete(entryKey);
+      if (localRateLimits.size <= RATE_LIMIT_FALLBACK_MAX * 0.9) break;
+    }
+  }
+  return bucket.count <= limit;
+}
+
+export async function consumeRateLimit(scope, identifier, limit, windowMs) {
+  const localKey = digest(JSON.stringify([scope, identifier]));
+  const redis = await readyClient();
+  if (!redis) return consumeLocalRateLimit(localKey, limit, windowMs);
+  try {
+    const count = Number(await redis.eval(RATE_LIMIT_SCRIPT, {
+      keys: [`veyra:v1:rate-limit:${localKey}`],
+      arguments: [String(windowMs)],
+    }));
+    return count <= limit;
+  } catch (error) {
+    console.warn('Redis rate limiting failed; using process-local limits:', error.message);
+    redisDisabledUntil = Date.now() + 2000;
+    return consumeLocalRateLimit(localKey, limit, windowMs);
+  }
+}
+
+
 export async function coalesce(key, operation) {
   const existing = inFlight.get(key);
   if (existing) return existing;

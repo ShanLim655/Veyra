@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { pool } from './db.mjs';
+import { consumeRateLimit } from './redis.mjs';
 
 const scrypt = promisify(scryptCallback);
 const COOKIE = 'veyra_session';
@@ -8,22 +9,10 @@ const GOOGLE_STATE_COOKIE = 'veyra_google_oauth';
 const SESSION_DAYS = 30;
 const EMAIL_TOKEN_HOURS = 2;
 const APP_URL = (process.env.APP_URL || process.env.VITE_APP_URL || 'http://localhost:8080').replace(/\/$/, '');
-const rateBuckets = new Map();
-
-function allowRequest(req, res, name, limit = 10, windowMs = 15 * 60 * 1000) {
-  const key = `${name}:${req.ip || req.socket.remoteAddress || 'unknown'}`;
-  const now = Date.now();
-  const bucket = rateBuckets.get(key);
-  if (!bucket || bucket.until <= now) {
-    rateBuckets.set(key, { count: 1, until: now + windowMs });
-    return true;
-  }
-  if (bucket.count >= limit) {
-    res.status(429).json({ error: 'Too many attempts. Please wait and try again.' });
-    return false;
-  }
-  bucket.count++;
-  return true;
+async function allowRequest(req, res, name, limit = 10, windowMs = 15 * 60 * 1000, identifier = req.ip || req.socket.remoteAddress || 'unknown') {
+  const allowed = await consumeRateLimit(name, identifier, limit, windowMs);
+  if (!allowed) res.status(429).json({ error: 'Too many attempts. Please wait and try again.' });
+  return allowed;
 }
 
 const hashToken = (token) => createHash('sha256').update(token).digest('hex');
@@ -191,20 +180,23 @@ export async function authenticateRequest(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Authentication required.' });
   try {
     const [rows] = await pool.execute(
-      `SELECT u.id, u.email, u.email_verified_at, p.username, p.display_name, p.avatar_url
+      `SELECT s.id AS session_id, u.id, u.email, u.email_verified_at, p.username, p.display_name, p.avatar_url
        FROM auth_sessions s JOIN auth_users u ON u.id = s.user_id
        JOIN profiles p ON p.id = u.id
        WHERE s.token_hash = ? AND s.expires_at > UTC_TIMESTAMP(3) AND u.email_verified_at IS NOT NULL LIMIT 1`,
       [hashToken(token)],
     );
     if (!rows.length) return res.status(401).json({ error: 'Invalid or expired session.' });
-    req.user = { ...rows[0], user_metadata: { username: rows[0].username, display_name: rows[0].display_name } };
+    const { session_id: sessionId, ...user } = rows[0];
+    req.sessionId = sessionId;
+    req.user = { ...user, user_metadata: { username: rows[0].username, display_name: rows[0].display_name } };
     next();
   } catch (error) { next(error); }
 }
 
 export function registerAuthRoutes(app) {
   app.post('/api/auth/native/pair/start', async (req, res) => {
+    if (!(await allowRequest(req, res, 'native-pair-start', 10, 60 * 60 * 1000))) return;
     const clientId = String(req.body?.clientId || '');
     if (!['android', 'desktop'].includes(clientId)) return res.status(400).json({ error: 'Unsupported app type.' });
     const code = randomToken();
@@ -217,6 +209,7 @@ export function registerAuthRoutes(app) {
   });
 
   app.post('/api/auth/native/pair/approve', authenticateRequest, async (req, res) => {
+    if (!(await allowRequest(req, res, 'native-pair-approve', 20, 15 * 60 * 1000, req.user.id))) return;
     const code = String(req.body?.code || '');
     const [result] = await pool.execute(
       'UPDATE auth_native_codes SET user_id = ? WHERE code_hash = ? AND user_id IS NULL AND consumed_at IS NULL AND expires_at > UTC_TIMESTAMP(3)',
@@ -228,6 +221,7 @@ export function registerAuthRoutes(app) {
   });
 
   app.post('/api/auth/native/exchange', async (req, res) => {
+    if (!(await allowRequest(req, res, 'native-pair-exchange', 20))) return;
     const code = String(req.body?.code || '');
     const clientId = String(req.body?.clientId || '');
     if (code.length < 32 || code.length > 128 || !['android', 'desktop'].includes(clientId)) {
@@ -266,8 +260,8 @@ export function registerAuthRoutes(app) {
     } finally { connection.release(); }
   });
 
-  app.get('/api/auth/google', (req, res) => {
-    if (!allowRequest(req, res, 'google-auth', 20)) return;
+  app.get('/api/auth/google', async (req, res) => {
+    if (!(await allowRequest(req, res, 'google-auth', 20))) return;
     const clientId = process.env.GOOGLE_CLIENT_ID;
     const returnTo = safeReturnTo(req.query.returnTo);
     if (!clientId || !process.env.GOOGLE_CLIENT_SECRET) return authRedirect(res, 'google_not_configured', returnTo);
@@ -350,13 +344,14 @@ export function registerAuthRoutes(app) {
   });
 
   app.post('/api/auth/signup', async (req, res) => {
-    if (!allowRequest(req, res, 'signup', 5, 60 * 60 * 1000)) return;
+    if (!(await allowRequest(req, res, 'signup', 5, 60 * 60 * 1000))) return;
     await verifyCaptcha(req.body?.captchaToken, req.ip);
     const email = normalizeEmail(req.body?.email);
     const password = String(req.body?.password || '');
     const username = String(req.body?.username || email.split('@')[0]).trim().slice(0, 32);
     const displayName = String(req.body?.display_name || username).trim().slice(0, 80);
     if (!email.includes('@') || password.length < 8 || !username) return res.status(400).json({ error: 'Enter a valid email, username, and password of at least 8 characters.' });
+    if (!(await allowRequest(req, res, 'signup-email', 3, 60 * 60 * 1000, email))) return;
     const userId = randomUUID();
     const connection = await pool.getConnection();
     try {
@@ -388,9 +383,10 @@ export function registerAuthRoutes(app) {
   });
 
   app.post('/api/auth/login', async (req, res) => {
-    if (!allowRequest(req, res, 'login', 20)) return;
+    if (!(await allowRequest(req, res, 'login', 20))) return;
     await verifyCaptcha(req.body?.captchaToken, req.ip);
     const email = normalizeEmail(req.body?.email);
+    if (!(await allowRequest(req, res, 'login-account', 30, 15 * 60 * 1000, email))) return;
     const [rows] = await pool.execute('SELECT id, email, password_hash, email_verified_at FROM auth_users WHERE email = ? LIMIT 1', [email]);
     const user = rows[0];
     if (!user || !(await passwordMatches(String(req.body?.password || ''), user.password_hash))) return res.status(401).json({ error: 'Email or password is incorrect.' });
@@ -411,18 +407,20 @@ export function registerAuthRoutes(app) {
   });
 
   app.post('/api/auth/forgot', async (req, res) => {
-    if (!allowRequest(req, res, 'forgot', 5, 60 * 60 * 1000)) return;
+    if (!(await allowRequest(req, res, 'forgot', 5, 60 * 60 * 1000))) return;
     await verifyCaptcha(req.body?.captchaToken, req.ip);
     const email = normalizeEmail(req.body?.email);
+    if (!(await allowRequest(req, res, 'forgot-account', 3, 60 * 60 * 1000, email))) return;
     const [rows] = await pool.execute('SELECT id, email FROM auth_users WHERE email = ? AND email_verified_at IS NOT NULL LIMIT 1', [email]);
     if (rows.length) {
       try { await createEmailToken(rows[0].id, rows[0].email, 'reset'); }
-      catch (error) { console.error('Password reset email failed:', error); return res.status(502).json({ error: 'Could not send reset email right now.' }); }
+      catch (error) { console.error('Password reset email failed:', error); }
     }
-    res.json({ ok: true, message: 'If that account exists, a password reset link has been sent.' });
+    res.json({ ok: true, message: 'If the account exists and email delivery is available, a password reset link will be sent.' });
   });
 
   app.post('/api/auth/verify', async (req, res) => {
+    if (!(await allowRequest(req, res, 'verify-email', 10))) return;
     const token = String(req.body?.token || '');
     const [rows] = await pool.execute("SELECT id, user_id FROM auth_email_tokens WHERE token_hash = ? AND purpose = 'confirm' AND expires_at > UTC_TIMESTAMP(3) LIMIT 1", [hashToken(token)]);
     if (!rows.length) return res.status(400).json({ error: 'Verification link is invalid or expired.' });
@@ -432,24 +430,50 @@ export function registerAuthRoutes(app) {
   });
 
   app.post('/api/auth/reset-password', async (req, res) => {
+    if (!(await allowRequest(req, res, 'reset-password', 5))) return;
     const token = String(req.body?.token || '');
     const password = String(req.body?.password || '');
     if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
-    const [rows] = await pool.execute('SELECT id, user_id FROM auth_email_tokens WHERE token_hash = ? AND purpose = \'reset\' AND expires_at > UTC_TIMESTAMP(3) LIMIT 1', [hashToken(token)]);
-    if (!rows.length) return res.status(400).json({ error: 'Reset link is invalid or expired.' });
-    await pool.execute('UPDATE auth_users SET password_hash = ? WHERE id = ?', [await passwordHash(password), rows[0].user_id]);
-    await pool.execute('DELETE FROM auth_email_tokens WHERE user_id = ? AND purpose = \'reset\'', [rows[0].user_id]);
-    await pool.execute('DELETE FROM auth_sessions WHERE user_id = ?', [rows[0].user_id]);
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [rows] = await connection.execute('SELECT id, user_id FROM auth_email_tokens WHERE token_hash = ? AND purpose = \'reset\' AND expires_at > UTC_TIMESTAMP(3) LIMIT 1 FOR UPDATE', [hashToken(token)]);
+      if (!rows.length) {
+        await connection.rollback();
+        return res.status(400).json({ error: 'Reset link is invalid or expired.' });
+      }
+      await connection.execute('UPDATE auth_users SET password_hash = ? WHERE id = ?', [await passwordHash(password), rows[0].user_id]);
+      await connection.execute('DELETE FROM auth_email_tokens WHERE user_id = ? AND purpose = \'reset\'', [rows[0].user_id]);
+      await connection.execute('DELETE FROM auth_sessions WHERE user_id = ?', [rows[0].user_id]);
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
     res.clearCookie(COOKIE, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/' });
     res.json({ ok: true });
   });
 
   app.post('/api/auth/change-password', authenticateRequest, async (req, res) => {
+    if (!(await allowRequest(req, res, 'change-password', 5, 15 * 60 * 1000, req.user.id))) return;
     const password = String(req.body?.password || '');
     if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
     const [rows] = await pool.execute('SELECT password_hash FROM auth_users WHERE id = ?', [req.user.id]);
     if (!(await passwordMatches(String(req.body?.current_password || ''), rows[0]?.password_hash || ''))) return res.status(400).json({ error: 'Current password is incorrect.' });
-    await pool.execute('UPDATE auth_users SET password_hash = ? WHERE id = ?', [await passwordHash(password), req.user.id]);
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      await connection.execute('UPDATE auth_users SET password_hash = ? WHERE id = ?', [await passwordHash(password), req.user.id]);
+      await connection.execute('DELETE FROM auth_sessions WHERE user_id = ? AND id <> ?', [req.user.id, req.sessionId]);
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
     res.json({ ok: true });
   });
 }

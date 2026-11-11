@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 
 process.env.REDIS_URL = '';
-const { cachedRead, coalesce } = await import('./redis.mjs');
+const { cachedRead, coalesce, consumeRateLimit } = await import('./redis.mjs');
 
 test('identical in-flight operations share one result', async () => {
   let calls = 0;
@@ -36,4 +37,27 @@ test('reads fall back to MariaDB when Redis is not configured', async () => {
   assert.deepEqual(results[0], { rows: [1, 2], next: null });
   assert.deepEqual(results[1], results[0]);
   assert.equal(queries, 1);
+});
+
+test('authentication rate limits reject requests after the configured limit', async () => {
+  const scope = `test-auth-${randomUUID()}`;
+  assert.equal(await consumeRateLimit(scope, 'client-a', 2, 60000), true);
+  assert.equal(await consumeRateLimit(scope, 'client-a', 2, 60000), true);
+  assert.equal(await consumeRateLimit(scope, 'client-a', 2, 60000), false);
+});
+
+test('authentication rate limits isolate different clients and scopes', async () => {
+  const scope = `test-auth-${randomUUID()}`;
+  assert.equal(await consumeRateLimit(scope, 'client-a', 1, 60000), true);
+  assert.equal(await consumeRateLimit(scope, 'client-a', 1, 60000), false);
+  assert.equal(await consumeRateLimit(scope, 'client-b', 1, 60000), true);
+  assert.equal(await consumeRateLimit(`${scope}-other`, 'client-a', 1, 60000), true);
+});
+
+test('authentication rate limits reset after their fixed window expires', async () => {
+  const scope = `test-auth-expiry-${randomUUID()}`;
+  assert.equal(await consumeRateLimit(scope, 'client-a', 1, 5), true);
+  assert.equal(await consumeRateLimit(scope, 'client-a', 1, 5), false);
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(await consumeRateLimit(scope, 'client-a', 1, 5), true);
 });

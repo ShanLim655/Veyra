@@ -78,9 +78,9 @@ import { GroupSettingsDialog } from "@/components/chat/GroupSettingsDialog";
 const EXPIRED_ATTACHMENT_IMG = "/expired-attachment.png";
 async function uploadChatMedia(bucket: "chat-images" | "chat-videos" | "chat-voice", path: string, file: Blob) {
   const response = await apiFetch("/api/storage/chat-upload", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bucket, path, contentType: file.type || "application/octet-stream", size: file.size }) });
-  const signed = await response.json() as { path?: string; token?: string; publicUrl?: string; error?: string };
+  const signed = await response.json() as { path?: string; token?: string; publicUrl?: string; contentType?: string; error?: string };
   if (!response.ok || !signed.path || !signed.token || !signed.publicUrl) throw new Error(signed.error || "Could not prepare the media upload.");
-  const { error } = await supabase.storage.from(bucket).uploadToSignedUrl(signed.path, signed.token, file, { contentType: file.type || "application/octet-stream", cacheControl: "31536000, immutable" });
+  const { error } = await supabase.storage.from(bucket).uploadToSignedUrl(signed.path, signed.token, file, { contentType: signed.contentType || "application/octet-stream", cacheControl: "31536000, immutable" });
   if (error) throw error;
   return signed.publicUrl;
 }
@@ -1110,6 +1110,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
 
   const fetchMessages = async (loadMore = false) => {
     if (!conversationId) return;
+    const requestConversationId = conversationId;
 
     if (loadMore) {
       if (loadingMoreRef.current || !hasMore || messagesRef.current.length === 0) return;
@@ -1124,14 +1125,16 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       .from(messagesTable)
       .select("*")
       .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
       .limit(MESSAGES_PER_PAGE);
     if (isDM) query = query.eq("conversation_id", conversationIdProp);
 
     if (oldestMessage) {
-      query = query.lt("created_at", oldestMessage.created_at);
+      query = query.or(`created_at.lt.${oldestMessage.created_at},and(created_at.eq.${oldestMessage.created_at},id.lt.${oldestMessage.id})`);
     }
 
     const { data, error } = await query;
+    if (activeConversationRef.current !== requestConversationId) return;
 
     if (error) {
       console.error("Error fetching messages:", error);
@@ -1164,6 +1167,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
           .in("id", replyToIds)
         : Promise.resolve({ data: [] }),
     ]);
+    if (activeConversationRef.current !== requestConversationId) return;
     const profiles = profileResult.data;
     const profilesMap = new Map((profiles || []).map((p) => [p.id, p]));
     const repliedMessages = repliedResult.data;
@@ -1177,6 +1181,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
           .in("id", replySenderIds)
       : { data: [] };
     
+    if (activeConversationRef.current !== requestConversationId) return;
     const replyProfilesMap = new Map((replyProfiles || []).map((p) => [p.id, p]));
     const repliedMessagesMap = new Map(((repliedMessages || []) as any[]).map((m: any) => {
       const sender = m.sender_id ? replyProfilesMap.get(m.sender_id) : undefined;
@@ -1205,7 +1210,8 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
               : ("sent" as const),
       };
     }));
-    messagesWithSenders.reverse(); // ascending order
+    if (activeConversationRef.current !== requestConversationId) return;
+    messagesWithSenders.reverse();
 
     if (loadMore) {
       // Preserve scroll position when loading older messages
@@ -1888,7 +1894,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
             <p className="font-semibold truncate">{channelTitle}</p>
           </div>
         )}
-        <ChatSearch messages={messages} onJump={scrollToMessage} currentUserId={user?.id} />
+        <ChatSearch messages={messages} onJump={scrollToMessage} currentUserId={user?.id} hasMore={hasMore} onLoadMore={() => fetchMessages(true)} />
         {(() => {
           const mentionMsgs = messages.filter(
             (m) =>

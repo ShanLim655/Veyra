@@ -8,6 +8,7 @@ import { authenticateRequest, registerAuthRoutes } from './auth.mjs';
 import { changesFromRpc, changeFromDataRequest, mariaDbRealtimeTopic, publishMariaDbChanges } from './realtime.mjs';
 import { getSupabaseAdmin } from './supabase-admin.mjs';
 import { invalidateReadCache } from './redis.mjs';
+import { normalizeChatUploadType } from './uploads.mjs';
 
 const MAX_PROFILE_IMAGE_BYTES = 25 * 1024 * 1024;
 const PROFILE_UPLOAD_TYPES = new Set(['image/jpeg', 'image/gif']);
@@ -16,6 +17,14 @@ const MAX_CHAT_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 export function createApp() {
   const app = express();
+  if (process.env.VERCEL === '1') {
+    app.set('trust proxy', 1);
+  } else if (process.env.TRUST_PROXY_HOPS !== undefined && process.env.TRUST_PROXY_HOPS !== '') {
+    const hops = process.env.TRUST_PROXY_HOPS;
+    if (hops === 'false') app.set('trust proxy', false);
+    else if (/^\d+$/.test(hops)) app.set('trust proxy', Number(hops));
+    else throw new Error('TRUST_PROXY_HOPS must be false or a non-negative integer.');
+  }
   if (!process.env.MARIADB_USER || !process.env.MARIADB_DATABASE) throw new Error('MARIADB_USER and MARIADB_DATABASE are required.');
   app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb' }));
@@ -109,11 +118,13 @@ export function createApp() {
     if (!Number.isFinite(size) || size <= 0 || size > MAX_CHAT_UPLOAD_BYTES) {
       return res.status(413).json({ error: 'Maximum file size is 25 MB.' });
     }
+    const storageContentType = normalizeChatUploadType(bucket, contentType);
+    if (!storageContentType) return res.status(415).json({ error: 'SVG uploads are not supported.' });
     try {
       const { data, error } = await getSupabaseAdmin().storage.from(bucket).createSignedUploadUrl(path);
       if (error || !data?.token) throw error || new Error('Could not create upload link.');
       const { data: publicData } = getSupabaseAdmin().storage.from(bucket).getPublicUrl(path);
-      res.json({ path, token: data.token, publicUrl: publicData.publicUrl, contentType });
+      res.json({ path, token: data.token, publicUrl: publicData.publicUrl, contentType: storageContentType });
     } catch (error) {
       console.error('Chat media upload link failed:', error);
       res.status(503).json({ error: 'Chat media storage is not configured.' });

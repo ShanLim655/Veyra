@@ -11,7 +11,7 @@ Desktop and Android installers are built and released through GitHub Actions. Se
 - **Sequenzy** sends account verification and password reset emails through its transactional API.
 - **Supabase Storage** stores avatars, banners, chat images, videos, and voice messages.
 - **Node.js** API and MariaDB power accounts and application data. The API can run on a server or as a Vercel Function.
-- **Supabase Realtime** carries presence and lightweight, member-scoped MariaDB change notices. Redis provides short-lived authenticated read caching, request coalescing, and a bounded retry queue for change notices; MariaDB remains the permanent source of truth.
+- **Supabase Realtime** carries presence and lightweight, member-scoped MariaDB change notices. Redis provides short-lived authenticated read caching, request coalescing, shared authentication rate limits, and a bounded retry queue for change notices; MariaDB remains the permanent source of truth.
 
 MariaDB, Google OAuth, and Sequenzy credentials stay on the server. The browser uses Supabase for Storage, presence, and receiving scoped change notices.
 
@@ -53,11 +53,11 @@ Copy `.env.example` to `.env.local` and set `MARIADB_*` values. `.env.local` is 
 
 Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` for Storage reads and Realtime. `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are server-only; the service key creates signed avatar/banner uploads and sends MariaDB change broadcasts, and also supports expired-object cleanup. Set `APP_URL` to the public app origin and `SEQUENZY_API_KEY` to a Sequenzy company API key with `transactional:send` permission. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in the API runtime environment to enable Google sign-in. Never put database, Google, or Sequenzy credentials in a `VITE_*` variable.
 
-Set `REDIS_URL` in `.env.local` and the production API environment to enable Redis. Veyra accepts `redis://` for Redis endpoints without TLS. Redis is optional and best-effort: MariaDB remains authoritative, Realtime notices are retried from a bounded Redis Stream, and missed messages are recovered from MariaDB when chat history loads. Cache entries are user and query scoped, expire quickly, and are invalidated after table writes. If Redis is unavailable, reads and broadcasts fall back to the existing MariaDB and Supabase paths. Typing and presence continue to use Supabase Realtime, which already provides connected-client presence and disconnect cleanup without exposing Redis credentials to browsers.
+Set `REDIS_URL` in `.env.local` and the production API environment to enable Redis. Veyra accepts `redis://` for Redis endpoints without TLS. Redis is optional and best-effort: MariaDB remains authoritative, Realtime notices are retried from a bounded Redis Stream, authentication limits are shared across API instances when Redis is available, and missed messages are recovered from MariaDB when chat history loads. Without Redis, authentication limits fall back to bounded per-process counters and therefore are not shared across API instances. Cache entries are user and query scoped, expire quickly, and are invalidated after table writes. If Redis is unavailable, reads and broadcasts fall back to the existing MariaDB and Supabase paths. Typing and presence continue to use Supabase Realtime, which already provides connected-client presence and disconnect cleanup without exposing Redis credentials to browsers.
 
 Redis read caching is restricted to results up to 256 KB and expires after two seconds. Each table has a generation key so a write invalidates older cached results across API instances. In-flight identical reads are coalesced per warm function instance; user ID and the complete query payload are part of the key, preserving authorization and pagination boundaries. Do not enable Redis eviction policies that can evict the stream outbox before acknowledged events are sent; MariaDB history still repairs missed live events.
 
-See [Redis operations and configuration](docs/redis.md) for connection setup, fallback behavior, and capacity notes.
+See [Redis operations and configuration](docs/redis.md) for connection setup, fallback behavior, and capacity notes. See [message encryption architecture](docs/message-encryption.md) for the distinction between TLS, encryption at rest, and E2EE, including the cross-client implementation gates. Private messages are not currently end-to-end encrypted; Global Chat remains server-readable for moderation.
 
 In Supabase Dashboard:
 
@@ -128,7 +128,11 @@ npm run db:migrate
 npm start
 ```
 
-The Node server can host the compiled frontend and API on `PORT` (default `3001`). On Vercel, a single function runs the same Express API for all API paths; set the pooled Layerbase MariaDB connection and server secrets in Vercel's environment settings. `MARIADB_POOL_SIZE` is capped at two per function instance and idle connections are released quickly to reduce pressure on Layerbase's 20-connection Free limit.
+The Node server binds to `HOST` (default `0.0.0.0`) and can host the compiled frontend and API on `PORT` (default `3001`). When deploying behind a trusted reverse proxy, set `TRUST_PROXY_HOPS` to the exact proxy hop count so IP-based authentication limits use the real client address; only do this when the proxy overwrites untrusted forwarded headers. Vercel configures its proxy trust automatically. On Vercel, a single function runs the same Express API for all API paths; set the pooled Layerbase MariaDB connection and server secrets in Vercel's environment settings. `MARIADB_POOL_SIZE` is capped at two per function instance and idle connections are released quickly to reduce pressure on Layerbase's 20-connection Free limit.
+
+## Background processing
+
+Altare-managed Queues is not integrated because no supported service contract is available. Veyra instead includes an optional MariaDB-backed notification outbox for self-hosted Node deployments. It is disabled by default, requires `npm run db:migrate`, and is enabled with `BACKGROUND_JOBS_ENABLED=true`; it does not require Redis or an Altare queue connection. When disabled, message notifications continue through the existing direct delivery path. See [background processing](docs/background-jobs.md) for setup, retry behavior, and operational recovery.
 
 ## Attachment cleanup and notifications
 

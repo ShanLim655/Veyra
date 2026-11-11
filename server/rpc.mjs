@@ -1,14 +1,36 @@
 import { randomUUID } from 'node:crypto';
 import { pool } from './db.mjs';
 
+const MAX_GROUP_MEMBERS = 256;
+
+export function boundedInteger(value, fallback, minimum, maximum) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed)
+    ? Math.min(Math.max(Math.trunc(parsed), minimum), maximum)
+    : fallback;
+}
+
+export function normalizeGroupName(value) {
+  const name = String(value ?? '').trim();
+  if (!name) throw new Error('Group name is required.');
+  if (name.length > 100) throw new Error('Group names cannot exceed 100 characters.');
+  return name;
+}
+
+export function normalizeGroupMemberIds(userId, memberIds) {
+  if (!Array.isArray(memberIds)) throw new Error('Group members must be provided as a list.');
+  const ids = [...new Set([userId, ...memberIds])];
+  if (ids.length > MAX_GROUP_MEMBERS) throw new Error(`Groups cannot exceed ${MAX_GROUP_MEMBERS} members.`);
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (ids.some((id) => typeof id !== 'string' || !uuidPattern.test(id))) {
+    throw new Error('One or more group member IDs are invalid.');
+  }
+  return ids;
+}
+
 async function adminCheck(userId, connection = pool) {
   const [rows] = await connection.execute("SELECT 1 FROM user_roles WHERE user_id = ? AND role IN ('admin','super_admin') LIMIT 1", [userId]);
   return rows.length > 0;
-}
-
-async function groupRole(userId, conversationId, connection = pool) {
-  const [rows] = await connection.execute('SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ? LIMIT 1', [conversationId, userId]);
-  return rows[0]?.role || null;
 }
 
 async function userDmList(userId) {
@@ -72,7 +94,7 @@ export async function callRpc(userId, name, args = {}) {
     }
     case 'get_admin_daily_stats': {
       if (!await adminCheck(userId)) throw new Error('Admin access required.');
-      const days = Math.min(Math.max(Number(args.days_count || 7), 1), 90);
+      const days = boundedInteger(args.days_count, 7, 1, 90);
       const [rows] = await pool.query(`SELECT calendar.day,
         COALESCE((SELECT COUNT(*) FROM messages WHERE DATE(created_at) = calendar.day), 0) AS messages,
         COALESCE((SELECT COUNT(*) FROM global_messages WHERE DATE(created_at) = calendar.day), 0) AS global_messages,
@@ -84,7 +106,7 @@ export async function callRpc(userId, name, args = {}) {
     }
     case 'get_admin_top_users': {
       if (!await adminCheck(userId)) throw new Error('Admin access required.');
-      const limit = Math.min(Math.max(Number(args.limit_count || 10), 1), 100);
+      const limit = boundedInteger(args.limit_count, 10, 1, 100);
       const [rows] = await pool.execute(`SELECT p.id, p.username, p.display_name, p.avatar_url,
         COALESCE(m.message_count, 0) + COALESCE(gm.message_count, 0) AS message_count
         FROM profiles p
@@ -159,8 +181,8 @@ export async function ensureDirectMessage(userId, otherId) {
 const getOrCreateDm = ensureDirectMessage;
 
 async function createGroupChat(userId, name, memberIds) {
-  if (!String(name || '').trim()) throw new Error('Group name is required.');
-  const uniqueIds = [...new Set([userId, ...memberIds])];
+  const normalizedName = normalizeGroupName(name);
+  const uniqueIds = normalizeGroupMemberIds(userId, memberIds);
   if (uniqueIds.length < 2) throw new Error('A group chat needs at least one other member.');
   const connection = await pool.getConnection();
   const id = randomUUID();
@@ -174,7 +196,7 @@ async function createGroupChat(userId, name, memberIds) {
       const [blocked] = await connection.execute('SELECT 1 FROM blocked_users WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?) LIMIT 1', [userId, memberId, memberId, userId]);
       if (blocked.length) throw new Error('A selected group member is unavailable.');
     }
-    await connection.execute('INSERT INTO conversations (id, is_group, name, created_by) VALUES (?, 1, ?, ?)', [id, String(name).trim(), userId]);
+    await connection.execute('INSERT INTO conversations (id, is_group, name, created_by) VALUES (?, 1, ?, ?)', [id, normalizedName, userId]);
     for (const member of uniqueIds) await connection.execute('INSERT INTO conversation_members (id, conversation_id, user_id, role) VALUES (?, ?, ?, ?)', [randomUUID(), id, member, member === userId ? 'owner' : 'member']);
     await connection.commit();
     return id;
@@ -185,63 +207,164 @@ async function createGroupChat(userId, name, memberIds) {
 }
 
 async function requireGroupAdmin(userId, conv, connection = pool) {
-  const role = await groupRole(userId, conv, connection);
+  const [rows] = await connection.execute(
+    'SELECT cm.role FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id WHERE c.id = ? AND c.is_group = 1 AND cm.user_id = ? LIMIT 1 FOR UPDATE',
+    [conv, userId],
+  );
+  const role = rows[0]?.role || null;
   if (!['owner', 'admin'].includes(role)) throw new Error('Group admin access required.');
   return role;
 }
 
 async function renameGroup(userId, conv, name) {
-  await requireGroupAdmin(userId, conv);
-  await pool.execute('UPDATE conversations SET name = ? WHERE id = ? AND is_group = 1', [String(name).trim(), conv]);
-  return null;
-}
-
-async function addGroupMembers(userId, conv, userIds) {
-  await requireGroupAdmin(userId, conv);
-  for (const member of [...new Set(userIds)]) {
-    const [friendship] = await pool.execute("SELECT 1 FROM friend_requests WHERE status = 'accepted' AND ((sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)) LIMIT 1", [userId, member, member, userId]);
-    if (!friendship.length) throw new Error('You can only add accepted friends to a group.');
-    await pool.execute('INSERT IGNORE INTO conversation_members (id, conversation_id, user_id, role) VALUES (?, ?, ?, \'member\')', [randomUUID(), conv, member]);
-  }
-  return null;
-}
-
-async function removeGroupMember(userId, conv, targetId) {
-  const role = await requireGroupAdmin(userId, conv);
-  if (targetId === userId && role === 'owner') throw new Error('Transfer ownership before leaving the group.');
-  if (await groupRole(targetId, conv) === 'owner') throw new Error('Transfer ownership before removing the owner.');
-  await pool.execute('DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?', [conv, targetId]);
-  return null;
-}
-
-async function setMemberRole(userId, conv, targetId, role) {
-  const actorRole = await requireGroupAdmin(userId, conv);
-  if (actorRole !== 'owner') throw new Error('Only the group owner can change roles.');
-  if (!['admin', 'member'].includes(role)) throw new Error('Invalid group role.');
-  await pool.execute('UPDATE conversation_members SET role = ? WHERE conversation_id = ? AND user_id = ? AND role <> \'owner\'', [role, conv, targetId]);
-  return null;
-}
-
-async function transferOwnership(userId, conv, targetId) {
-  const actorRole = await requireGroupAdmin(userId, conv);
-  if (actorRole !== 'owner') throw new Error('Only the group owner can transfer ownership.');
+  const normalizedName = normalizeGroupName(name);
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
-    const [target] = await connection.execute('SELECT id FROM conversation_members WHERE conversation_id = ? AND user_id = ? FOR UPDATE', [conv, targetId]);
+    await requireGroupAdmin(userId, conv, connection);
+    await connection.execute('UPDATE conversations SET name = ? WHERE id = ? AND is_group = 1', [normalizedName, conv]);
+    await connection.commit();
+    return null;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function addGroupMembers(userId, conv, userIds) {
+  const members = normalizeGroupMemberIds(userId, userIds).filter((id) => id !== userId);
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    await requireGroupAdmin(userId, conv, connection);
+    if (!members.length) {
+      await connection.commit();
+      return null;
+    }
+    const [profiles] = await connection.execute(
+      `SELECT id FROM profiles WHERE id IN (${members.map(() => '?').join(',')}) FOR UPDATE`,
+      members,
+    );
+    if (profiles.length !== members.length) throw new Error('One or more group members do not exist.');
+    for (const member of members) {
+      const [friendship] = await connection.execute(
+        "SELECT 1 FROM friend_requests WHERE status = 'accepted' AND ((sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)) LIMIT 1",
+        [userId, member, member, userId],
+      );
+      if (!friendship.length) throw new Error('You can only add accepted friends to a group.');
+      const [blocked] = await connection.execute(
+        'SELECT 1 FROM blocked_users WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?) LIMIT 1',
+        [userId, member, member, userId],
+      );
+      if (blocked.length) throw new Error('A selected group member is unavailable.');
+      await connection.execute(
+        "INSERT IGNORE INTO conversation_members (id, conversation_id, user_id, role) VALUES (?, ?, ?, 'member')",
+        [randomUUID(), conv, member],
+      );
+    }
+    await connection.commit();
+    return null;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function removeGroupMember(userId, conv, targetId) {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const actorRole = await requireGroupAdmin(userId, conv, connection);
+    const [target] = await connection.execute(
+      'SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ? FOR UPDATE',
+      [conv, targetId],
+    );
+    if (!target.length) throw new Error('That user is not a member of this group.');
+    if (targetId === userId && actorRole === 'owner') throw new Error('Transfer ownership before leaving the group.');
+    if (target[0].role === 'owner') throw new Error('Transfer ownership before removing the owner.');
+    if (actorRole === 'admin' && target[0].role === 'admin') throw new Error('Group admins cannot remove other admins.');
+    await connection.execute('DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?', [conv, targetId]);
+    await connection.commit();
+    return null;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function setMemberRole(userId, conv, targetId, role) {
+  if (!['admin', 'member'].includes(role)) throw new Error('Invalid group role.');
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const actorRole = await requireGroupAdmin(userId, conv, connection);
+    if (actorRole !== 'owner') throw new Error('Only the group owner can change roles.');
+    const [target] = await connection.execute(
+      'SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ? FOR UPDATE',
+      [conv, targetId],
+    );
+    if (!target.length) throw new Error('That user is not a member of this group.');
+    if (target[0].role === 'owner') throw new Error('The group owner role cannot be changed here.');
+    await connection.execute('UPDATE conversation_members SET role = ? WHERE conversation_id = ? AND user_id = ?', [role, conv, targetId]);
+    await connection.commit();
+    return null;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function transferOwnership(userId, conv, targetId) {
+  if (targetId === userId) throw new Error('Choose another group member as the new owner.');
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const actorRole = await requireGroupAdmin(userId, conv, connection);
+    if (actorRole !== 'owner') throw new Error('Only the group owner can transfer ownership.');
+    const [target] = await connection.execute(
+      'SELECT id FROM conversation_members WHERE conversation_id = ? AND user_id = ? FOR UPDATE',
+      [conv, targetId],
+    );
     if (!target.length) throw new Error('The new owner must be a group member.');
     await connection.execute("UPDATE conversation_members SET role = 'admin' WHERE conversation_id = ? AND user_id = ?", [conv, userId]);
     await connection.execute("UPDATE conversation_members SET role = 'owner' WHERE conversation_id = ? AND user_id = ?", [conv, targetId]);
     await connection.commit();
     return null;
-  } catch (error) { await connection.rollback(); throw error; }
-  finally { connection.release(); }
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
 }
 
 async function leaveGroup(userId, conv) {
-  if (await groupRole(userId, conv) === 'owner') throw new Error('Transfer ownership before leaving the group.');
-  await pool.execute('DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?', [conv, userId]);
-  return null;
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [rows] = await connection.execute(
+      'SELECT cm.role FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id WHERE c.id = ? AND c.is_group = 1 AND cm.user_id = ? FOR UPDATE',
+      [conv, userId],
+    );
+    if (!rows.length) throw new Error('You are not a member of this group.');
+    if (rows[0].role === 'owner') throw new Error('Transfer ownership before leaving the group.');
+    await connection.execute('DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?', [conv, userId]);
+    await connection.commit();
+    return null;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
 }
 
 async function markMessage(userId, messageId, column) {
