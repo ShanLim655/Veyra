@@ -18,6 +18,8 @@ test('version comparison handles major, minor, and patch changes', () => {
 
 test('installer URLs must target this repository release assets over HTTPS', () => {
   assert.equal(isReleaseAssetUrl('https://github.com/ShanLim655/Veyra/releases/download/v1.2.0/Veyra1.2.0.exe', '1.2.0'), true);
+  assert.equal(isReleaseAssetUrl('https://user@github.com/ShanLim655/Veyra/releases/download/v1.2.0/Veyra1.2.0.exe', '1.2.0'), false);
+  assert.equal(isReleaseAssetUrl('https://github.com:8443/ShanLim655/Veyra/releases/download/v1.2.0/Veyra1.2.0.exe', '1.2.0'), false);
   assert.equal(isReleaseAssetUrl('http://github.com/ShanLim655/Veyra/releases/download/v1.2.0/Veyra1.2.0.exe', '1.2.0'), false);
   assert.equal(isReleaseAssetUrl('https://github.com/ShanLim655/Veyra/releases/download/v1.2.0/Veyra1.1.8.exe', '1.2.0'), false);
   assert.equal(isReleaseAssetUrl('https://github.com/ShanLim655/Veyra/releases/download/v1.1.8/Veyra1.2.0.exe', '1.2.0'), false);
@@ -28,6 +30,8 @@ test('installer URLs must target this repository release assets over HTTPS', () 
 
 test('download redirects must end on an approved HTTPS asset host', () => {
   assert.equal(isFinalAssetUrl('https://objects.githubusercontent.com/assets/file'), true);
+  assert.equal(isFinalAssetUrl('https://user@objects.githubusercontent.com/assets/file'), false);
+  assert.equal(isFinalAssetUrl('https://objects.githubusercontent.com:8443/assets/file'), false);
   assert.equal(isFinalAssetUrl('https://release-assets.githubusercontent.com/assets/file'), true);
   assert.equal(isFinalAssetUrl('https://github.com/ShanLim655/Veyra/releases/download/v1.2.0/latest.json'), false);
   assert.equal(isFinalAssetUrl('https://evil.example/assets/file'), false);

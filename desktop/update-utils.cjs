@@ -27,6 +27,9 @@ function isReleaseAssetUrl(value, version) {
     if (!isReleaseVersion(version)) return false;
     return url.protocol === 'https:'
       && url.hostname === 'github.com'
+      && (!url.port || url.port === '443')
+      && !url.username
+      && !url.password
       && url.pathname === `/ShanLim655/Veyra/releases/download/v${version}/Veyra${version}.exe`
       && !url.search
       && !url.hash;
@@ -38,7 +41,11 @@ function isReleaseAssetUrl(value, version) {
 function isFinalAssetUrl(value) {
   try {
     const url = new URL(String(value));
-    return url.protocol === 'https:' && FINAL_ASSET_HOSTS.has(url.hostname);
+    return url.protocol === 'https:'
+      && FINAL_ASSET_HOSTS.has(url.hostname)
+      && (!url.port || url.port === '443')
+      && !url.username
+      && !url.password;
   } catch {
     return false;
   }
