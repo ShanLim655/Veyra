@@ -82,3 +82,16 @@ export async function purgeExpiredAttachments() {
   }
   return { ok: true, cutoff, summary };
 }
+
+export async function cleanupExpiredAuthArtifacts() {
+  const [sessions] = await pool.execute('DELETE FROM auth_sessions WHERE expires_at <= UTC_TIMESTAMP(3)');
+  const [codes] = await pool.execute('DELETE FROM auth_native_codes WHERE expires_at <= UTC_TIMESTAMP(3)');
+  const [consumedCodes] = await pool.execute('DELETE FROM auth_native_codes WHERE consumed_at IS NOT NULL AND consumed_at < UTC_TIMESTAMP(3) - INTERVAL 1 DAY');
+  const [emailTokens] = await pool.execute('DELETE FROM auth_email_tokens WHERE expires_at <= UTC_TIMESTAMP(3)');
+  return {
+    expiredSessions: sessions.affectedRows,
+    expiredNativeCodes: codes.affectedRows,
+    consumedNativeCodes: consumedCodes.affectedRows,
+    expiredEmailTokens: emailTokens.affectedRows,
+  };
+}

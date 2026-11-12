@@ -185,11 +185,12 @@ export function MembersList() {
         case "created_at":
           comparison = new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
           break;
-        case "messages":
+        case "messages": {
           const aMessages = memberStats[a.id]?.messageCount || 0;
           const bMessages = memberStats[b.id]?.messageCount || 0;
           comparison = aMessages - bMessages;
           break;
+        }
       }
 
       return sortOrder === "asc" ? comparison : -comparison;

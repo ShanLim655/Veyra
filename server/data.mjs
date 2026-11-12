@@ -3,6 +3,7 @@ import { pool } from './db.mjs';
 import { ensureDirectMessage } from './rpc.mjs';
 import { notifyNewMessage } from './notifications.mjs';
 import { cachedRead, invalidateReadCache } from './redis.mjs';
+import { decryptRowsForTable, encryptRowForTable } from './encryption.mjs';
 
 const TABLES = new Set([
   'admin_logs', 'announcement_messages', 'blocked_users', 'conversation_members',
@@ -240,13 +241,14 @@ async function queryDataUncached(userId, payload) {
         if (!polls[0].multiple_choice) await pool.execute('DELETE FROM poll_votes WHERE poll_id = ? AND user_id = ? AND option_id <> ?', [row.poll_id, row.user_id, row.option_id]);
       }
       const normalizedRow = normalizeRowTemporalValues(row, columns);
-      const keys = Object.keys(normalizedRow);
+      const storedRow = encryptRowForTable(table, normalizedRow);
+      const keys = Object.keys(storedRow);
       for (const key of keys) identifier(key, columns);
       if (!keys.length) throw new Error('Insert data is empty.');
       const updateKeys = operation === 'upsert' ? keys.filter((key) => key !== 'id' && key !== 'user_id') : [];
       const [result] = await pool.execute(
         `INSERT INTO \`${table}\` (${keys.map((key) => `\`${key}\``).join(', ')}) VALUES (${keys.map(() => '?').join(', ')})${operation === 'upsert' && updateKeys.length ? ` ON DUPLICATE KEY UPDATE ${updateKeys.map((key) => `\`${key}\` = VALUES(\`${key}\`)`).join(', ')}` : ''}`,
-        keys.map((key) => normalizedRow[key]),
+        keys.map((key) => storedRow[key]),
       );
       inserted.push(row.id ?? row.user_id ?? result.insertId);
     }
@@ -260,7 +262,7 @@ async function queryDataUncached(userId, payload) {
   }
 
   if (operation === 'update') {
-    const patch = normalizeRowTemporalValues(payload.values || {}, columns);
+    const patch = encryptRowForTable(table, normalizeRowTemporalValues(payload.values || {}, columns));
     const keys = Object.keys(patch);
     for (const key of keys) identifier(key, columns);
     if (!keys.length) return { data: [], count: 0 };
@@ -300,12 +302,18 @@ async function queryDataUncached(userId, payload) {
 export async function queryData(userId, payload) {
   const table = payload?.table;
   const operation = payload?.operation || 'select';
+  // Decryption happens after the Redis read cache so cached payloads only ever
+  // contain ciphertext, never plaintext message content.
+  const withDecryptedData = (result) => {
+    if (result && result.data != null) result.data = decryptRowsForTable(table, result.data);
+    return result;
+  };
   if (operation === 'select') {
-    return cachedRead(userId, table, payload, () => queryDataUncached(userId, payload));
+    return cachedRead(userId, table, payload, () => queryDataUncached(userId, payload)).then(withDecryptedData);
   }
   const result = await queryDataUncached(userId, payload);
   if (result?.count > 0) await invalidateReadCache(table);
-  return result;
+  return withDecryptedData(result);
 }
 
 async function canInsert(table, row, userId, access) {

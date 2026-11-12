@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { pool } from './db.mjs';
+import { enqueueJob } from './queues.mjs';
 
 const DEFAULT_SERVER = process.env.NTFY_SERVER_URL || 'https://ntfy.chat-amani.xyz';
 const ALLOWED_HOSTS = ['ntfy.sh', 'ntfy.chat-amani.xyz'];
@@ -28,6 +30,11 @@ async function publish(server, topic, title, message) {
     });
     return response.ok;
   } catch { return false; }
+}
+
+// Direct ntfy delivery used both inline and by the queue worker endpoint.
+export async function deliverPushNotification({ server, topic, title, message }) {
+  return publish(server, topic, title, message);
 }
 
 export async function sendTestNotification(userId) {
@@ -76,6 +83,12 @@ export async function notifyNewMessage(table, row) {
       title = render(titleTemplate, { user: sender, message: row.content || '(no text)' });
       message = render(bodyTemplate, { user: sender, message: row.content || '(no text)' });
     }
-    if (await publish(server, topic, title, message)) sent.add(dedupeKey);
+    const job = { server, topic, title, message };
+    const { delivered, result } = await enqueueJob('notifications.deliver', job, {
+      idempotencyKey: `veyra-notify-${randomUUID()}`,
+      fallback: () => deliverPushNotification(job),
+    });
+    const accepted = delivered === 'queued' || (delivered !== 'unavailable' && Boolean(result));
+    if (accepted) sent.add(dedupeKey);
   }
 }

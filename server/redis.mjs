@@ -83,6 +83,26 @@ export async function cachedRead(userId, table, payload, operation) {
   });
 }
 
+const RATE_LIMIT_PREFIX = 'veyra:v1:ratelimit:';
+
+// Fixed-window rate limit backed by Redis so limits hold across serverless
+// instances and restarts. Returns null when Redis is unavailable so callers
+// can fall back to their local in-memory limiter.
+export async function consumeRateLimit(key, limit, windowMs) {
+  const redis = await readyClient();
+  if (!redis) return null;
+  try {
+    const fullKey = `${RATE_LIMIT_PREFIX}${key}`;
+    const count = await redis.incr(fullKey);
+    if (count === 1) await redis.pExpire(fullKey, windowMs);
+    return { allowed: count <= limit, count, limit };
+  } catch (error) {
+    console.warn('Redis rate limit failed; caller should use its fallback:', error.message);
+    redisDisabledUntil = Date.now() + 2000;
+    return null;
+  }
+}
+
 const REALTIME_STREAM = 'veyra:v1:realtime-outbox';
 
 export async function enqueueRealtimeBatch(messages) {

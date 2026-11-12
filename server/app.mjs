@@ -2,12 +2,14 @@ import express from 'express';
 import { pool } from './db.mjs';
 import { queryData } from './data.mjs';
 import { callRpc } from './rpc.mjs';
-import { sendTestNotification } from './notifications.mjs';
-import { purgeExpiredAttachments } from './maintenance.mjs';
+import { sendTestNotification, deliverPushNotification } from './notifications.mjs';
+import { purgeExpiredAttachments, cleanupExpiredAuthArtifacts } from './maintenance.mjs';
 import { authenticateRequest, registerAuthRoutes } from './auth.mjs';
 import { changesFromRpc, changeFromDataRequest, mariaDbRealtimeTopic, publishMariaDbChanges } from './realtime.mjs';
 import { getSupabaseAdmin } from './supabase-admin.mjs';
-import { invalidateReadCache } from './redis.mjs';
+import { invalidateReadCache, consumeRateLimit } from './redis.mjs';
+import { assertEncryptionConfig, encryptionEnabled } from './encryption.mjs';
+import { assertQueuesConfig } from './queues.mjs';
 
 const MAX_PROFILE_IMAGE_BYTES = 25 * 1024 * 1024;
 const PROFILE_UPLOAD_TYPES = new Set(['image/jpeg', 'image/gif']);
@@ -17,8 +19,27 @@ const MAX_CHAT_UPLOAD_BYTES = 25 * 1024 * 1024;
 export function createApp() {
   const app = express();
   if (!process.env.MARIADB_USER || !process.env.MARIADB_DATABASE) throw new Error('MARIADB_USER and MARIADB_DATABASE are required.');
+  assertEncryptionConfig();
+  if (!encryptionEnabled()) {
+    console.warn('MESSAGE_ENCRYPTION_KEY is not set; message content will be stored without database encryption.');
+  }
+  assertQueuesConfig();
   app.disable('x-powered-by');
+  // Vercel/other reverse proxies append the real client IP to X-Forwarded-For;
+  // trusting one hop makes req.ip (used by auth rate limits) the client IP.
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '1mb' }));
+  app.use((_req, res, next) => {
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('X-Frame-Options', 'DENY');
+    res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+    // Voice messages need the microphone; nothing else is required.
+    res.set('Permissions-Policy', 'camera=(), microphone=(self), geolocation=()');
+    if (process.env.NODE_ENV === 'production' && String(process.env.APP_URL || '').startsWith('https://')) {
+      res.set('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
+    }
+    next();
+  });
   app.use((req, _res, next) => {
     const requestUrl = new URL(req.url || '/', 'http://veyra.local');
     const apiPath = requestUrl.searchParams.get('apiPath') || requestUrl.searchParams.get('__api_path');
@@ -40,10 +61,19 @@ export function createApp() {
       req.cronAuthorized = true;
       return next();
     }
+    if (req.path === '/queues/deliver' && process.env.QUEUES_WORKER_SECRET && req.get('x-queue-worker-secret') === process.env.QUEUES_WORKER_SECRET) {
+      req.queueWorkerAuthorized = true;
+      return next();
+    }
     authenticateRequest(req, res, next);
   });
   app.post('/api/data', async (req, res) => {
     try {
+      // Generous per-user ceiling; only enforced when Redis is configured.
+      const limited = await consumeRateLimit(`data:${req.user.id}`, 600, 60_000);
+      if (limited && !limited.allowed) {
+        return res.status(429).json({ error: 'Too many requests. Please slow down and try again.' });
+      }
       const result = await queryData(req.user.id, req.body);
       const change = changeFromDataRequest(req.body, result);
       if (change) await publishMariaDbChanges([change], req.user.id);
@@ -52,6 +82,11 @@ export function createApp() {
       res.json(response);
     }
     catch (error) {
+      // Never leak driver/internal error details to clients.
+      if (typeof error?.code === 'string' && error.code.startsWith('ER_')) {
+        console.error('Data request failed:', error);
+        return res.status(500).json({ error: 'The server could not complete the request.' });
+      }
       const status = /not allowed|unknown table|unsupported/i.test(error.message) ? 403 : 400;
       res.status(status).json({ error: error.message || 'Database request failed.' });
     }
@@ -69,6 +104,10 @@ export function createApp() {
       res.json({ data });
     }
     catch (error) {
+      if (typeof error?.code === 'string' && error.code.startsWith('ER_')) {
+        console.error('RPC request failed:', error);
+        return res.status(500).json({ error: 'The server could not complete the request.' });
+      }
       const status = /not allowed|admin access|unsupported|only the|must be|access required/i.test(error.message) ? 403 : 400;
       res.status(status).json({ error: error.message || 'Database action failed.' });
     }
@@ -143,12 +182,28 @@ export function createApp() {
       res.status(503).json({ error: 'Chat media storage is unavailable.' });
     }
   });
+  // Worker endpoint for optional Altare Queues consumers. A queue worker posts
+  // jobs of type "notifications.deliver" here to perform the actual ntfy send.
+  app.post('/api/queues/deliver', async (req, res) => {
+    if (!req.queueWorkerAuthorized) return res.status(403).json({ error: 'Queue worker authorization required.' });
+    const { server, topic, title, message } = req.body || {};
+    try {
+      const ok = await deliverPushNotification({ server, topic, title, message });
+      res.json({ ok });
+    } catch (error) {
+      res.status(500).json({ ok: false, error: error.message || 'Notification delivery failed.' });
+    }
+  });
   app.post('/api/maintenance/purge-expired-attachments', async (req, res) => {
     if (!req.cronAuthorized) {
       const [rows] = await pool.execute("SELECT 1 FROM user_roles WHERE user_id = ? AND role = 'super_admin' LIMIT 1", [req.user.id]);
       if (!rows.length) return res.status(403).json({ error: 'Super admin access required.' });
     }
-    try { res.json(await purgeExpiredAttachments()); }
+    try {
+      const attachments = await purgeExpiredAttachments();
+      const authCleanup = await cleanupExpiredAuthArtifacts();
+      res.json({ ...attachments, authCleanup });
+    }
     catch (error) { res.status(500).json({ error: error.message || 'Attachment cleanup failed.' }); }
   });
   app.use((error, _req, res, _next) => {

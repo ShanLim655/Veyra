@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { pool } from './db.mjs';
+import { consumeRateLimit } from './redis.mjs';
 
 const scrypt = promisify(scryptCallback);
 const COOKIE = 'veyra_session';
@@ -10,8 +11,15 @@ const EMAIL_TOKEN_HOURS = 2;
 const APP_URL = (process.env.APP_URL || process.env.VITE_APP_URL || 'http://localhost:8080').replace(/\/$/, '');
 const rateBuckets = new Map();
 
-function allowRequest(req, res, name, limit = 10, windowMs = 15 * 60 * 1000) {
-  const key = `${name}:${req.ip || req.socket.remoteAddress || 'unknown'}`;
+async function allowRequest(req, res, name, limit = 10, windowMs = 15 * 60 * 1000) {
+  const identity = req.ip || req.socket.remoteAddress || 'unknown';
+  const shared = await consumeRateLimit(`${name}:${identity}`, limit, windowMs);
+  if (shared) {
+    if (shared.allowed) return true;
+    res.status(429).json({ error: 'Too many attempts. Please wait and try again.' });
+    return false;
+  }
+  const key = `${name}:${identity}`;
   const now = Date.now();
   const bucket = rateBuckets.get(key);
   if (!bucket || bucket.until <= now) {
@@ -266,8 +274,8 @@ export function registerAuthRoutes(app) {
     } finally { connection.release(); }
   });
 
-  app.get('/api/auth/google', (req, res) => {
-    if (!allowRequest(req, res, 'google-auth', 20)) return;
+  app.get('/api/auth/google', async (req, res) => {
+    if (!await allowRequest(req, res, 'google-auth', 20)) return;
     const clientId = process.env.GOOGLE_CLIENT_ID;
     const returnTo = safeReturnTo(req.query.returnTo);
     if (!clientId || !process.env.GOOGLE_CLIENT_SECRET) return authRedirect(res, 'google_not_configured', returnTo);
@@ -350,7 +358,7 @@ export function registerAuthRoutes(app) {
   });
 
   app.post('/api/auth/signup', async (req, res) => {
-    if (!allowRequest(req, res, 'signup', 5, 60 * 60 * 1000)) return;
+    if (!await allowRequest(req, res, 'signup', 5, 60 * 60 * 1000)) return;
     await verifyCaptcha(req.body?.captchaToken, req.ip);
     const email = normalizeEmail(req.body?.email);
     const password = String(req.body?.password || '');
@@ -388,7 +396,7 @@ export function registerAuthRoutes(app) {
   });
 
   app.post('/api/auth/login', async (req, res) => {
-    if (!allowRequest(req, res, 'login', 20)) return;
+    if (!await allowRequest(req, res, 'login', 20)) return;
     await verifyCaptcha(req.body?.captchaToken, req.ip);
     const email = normalizeEmail(req.body?.email);
     const [rows] = await pool.execute('SELECT id, email, password_hash, email_verified_at FROM auth_users WHERE email = ? LIMIT 1', [email]);
@@ -411,7 +419,7 @@ export function registerAuthRoutes(app) {
   });
 
   app.post('/api/auth/forgot', async (req, res) => {
-    if (!allowRequest(req, res, 'forgot', 5, 60 * 60 * 1000)) return;
+    if (!await allowRequest(req, res, 'forgot', 5, 60 * 60 * 1000)) return;
     await verifyCaptcha(req.body?.captchaToken, req.ip);
     const email = normalizeEmail(req.body?.email);
     const [rows] = await pool.execute('SELECT id, email FROM auth_users WHERE email = ? AND email_verified_at IS NOT NULL LIMIT 1', [email]);
@@ -450,6 +458,50 @@ export function registerAuthRoutes(app) {
     const [rows] = await pool.execute('SELECT password_hash FROM auth_users WHERE id = ?', [req.user.id]);
     if (!(await passwordMatches(String(req.body?.current_password || ''), rows[0]?.password_hash || ''))) return res.status(400).json({ error: 'Current password is incorrect.' });
     await pool.execute('UPDATE auth_users SET password_hash = ? WHERE id = ?', [await passwordHash(password), req.user.id]);
+    await pool.execute('DELETE FROM auth_sessions WHERE user_id = ?', [req.user.id]);
+    res.clearCookie(COOKIE, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/' });
+    res.json({ ok: true, message: 'Password updated. Please sign in again.' });
+  });
+
+  const requestSessionToken = (req) => {
+    const authorization = String(req.headers.authorization || '');
+    return authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : cookieValue(req, COOKIE);
+  };
+
+  app.get('/api/auth/sessions', authenticateRequest, async (req, res) => {
+    const currentHash = hashToken(requestSessionToken(req) || '');
+    const [rows] = await pool.execute(
+      'SELECT id, token_hash, created_at, expires_at FROM auth_sessions WHERE user_id = ? AND expires_at > UTC_TIMESTAMP(3) ORDER BY created_at DESC',
+      [req.user.id],
+    );
+    res.json({
+      sessions: rows.map(({ token_hash, ...session }) => ({
+        ...session,
+        current: Boolean(currentHash) && token_hash === currentHash,
+      })),
+    });
+  });
+
+  app.post('/api/auth/sessions/revoke', authenticateRequest, async (req, res) => {
+    const currentHash = hashToken(requestSessionToken(req) || '');
+    if (req.body?.others === true) {
+      const [result] = await pool.execute(
+        'DELETE FROM auth_sessions WHERE user_id = ? AND token_hash <> ?',
+        [req.user.id, currentHash],
+      );
+      return res.json({ ok: true, revoked: result.affectedRows });
+    }
+    const sessionId = String(req.body?.session_id || '');
+    if (!sessionId) return res.status(400).json({ error: 'session_id is required.' });
+    const [rows] = await pool.execute(
+      'SELECT token_hash FROM auth_sessions WHERE id = ? AND user_id = ? LIMIT 1',
+      [sessionId, req.user.id],
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Session not found.' });
+    await pool.execute('DELETE FROM auth_sessions WHERE id = ? AND user_id = ?', [sessionId, req.user.id]);
+    if (rows[0].token_hash === currentHash) {
+      res.clearCookie(COOKIE, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/' });
+    }
     res.json({ ok: true });
   });
 }

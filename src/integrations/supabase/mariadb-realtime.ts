@@ -29,6 +29,7 @@ export type MariaDbChangeCallback = Subscriber['callback'];
 type RealtimeChannel = ReturnType<typeof authClient.channel>;
 
 const subscribers = new Set<Subscriber>();
+const reconnectListeners = new Set<() => void>();
 let userId: string | null = null;
 let userTopic: string | null = null;
 let userTopicRequest: Promise<void> | null = null;
@@ -74,11 +75,38 @@ function dispatch(message: unknown, publicOnly: boolean) {
   }
 }
 
+function notifyRealtimeReconnect() {
+  for (const listener of reconnectListeners) {
+    try {
+      listener();
+    } catch (error) {
+      console.warn('Realtime reconnect listener failed:', error instanceof Error ? error.message : error);
+    }
+  }
+}
+
+// Fires when a shared realtime channel recovers to SUBSCRIBED after dropping.
+// Broadcasts missed while the channel was down are not replayed, so callers
+// should resync the data they were subscribed to.
+export function onMariaDbRealtimeReconnect(listener: () => void) {
+  reconnectListeners.add(listener);
+  return () => { reconnectListeners.delete(listener); };
+}
+
 function openChannel(topic: string, publicOnly: boolean) {
   const channel = authClient.channel(topic);
+  let subscribedOnce = false;
+  let degraded = false;
   channel
     .on('broadcast', { event: 'db-change' }, (message: unknown) => dispatch(message, publicOnly))
     .subscribe((status) => {
+      if (status === 'SUBSCRIBED') {
+        if (degraded) notifyRealtimeReconnect();
+        degraded = false;
+        subscribedOnce = true;
+      } else if (subscribedOnce) {
+        degraded = true;
+      }
       if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
         console.warn('MariaDB live-update channel status:', status);
       }
