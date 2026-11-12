@@ -1157,12 +1157,15 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     const senderIds = [...new Set((data || []).map((m: any) => m.sender_id).filter((id: string | null) => id && id !== user?.id))] as string[];
     const replyToIds = [...new Set((data || []).map((m: any) => m.reply_to_id).filter(Boolean))] as string[];
 
+    let messagesWithSenders: Message[];
+    try {
     // These reads are independent; issue them together instead of making each
     // chat load wait through multiple database round trips in sequence.
-    const [reactionsMap, profileResult, repliedResult] = await Promise.all([
+    const [reactionsMap, , profileResult, repliedResult] = await Promise.all([
       fetchReactions(messageIds),
       // Sign every media URL in the page with one batched request instead of
-      // one API call per message.
+      // one API call per message. Result is unused — it only warms the
+      // signChatUrl cache that signMessageMedia reads below.
       prefetchChatUrls((data || []).flatMap((m: any) => collectMediaUrls(m.image_url))),
       senderIds.length > 0
         ? supabase
@@ -1219,6 +1222,14 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       };
     }));
     messagesWithSenders.reverse(); // ascending order
+    } catch (enrichError) {
+      // A failure while enriching (profiles/reactions/media signing) must not
+      // wedge pagination: reset the load-more flags and keep existing messages.
+      console.error("Error enriching messages:", enrichError);
+      setLoadingMore(false);
+      loadingMoreRef.current = false;
+      return;
+    }
 
     if (loadMore) {
       // Preserve scroll position when loading older messages
