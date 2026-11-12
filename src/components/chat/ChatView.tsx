@@ -727,7 +727,8 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
               }
               newMsg.reactions = [];
               const rawImageUrl = newMsg.image_url || null;
-              newMsg.image_url = await signMessageMedia(newMsg.image_url);
+              // Signing is best-effort — a failure must not drop the live message.
+              newMsg.image_url = await signMessageMedia(newMsg.image_url).catch(() => newMsg.image_url);
               reconcileLiveMessage({ ...newMsg, _status: "sent" }, rawImageUrl);
               // Scroll to bottom only if user is already near the bottom
               setTimeout(() => {
@@ -1202,7 +1203,8 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     messagesWithSenders = await Promise.all((data || []).map(async (msg: any) => {
       const sender = msg.sender_id === user?.id ? ownSenderProfile : msg.sender_id ? profilesMap.get(msg.sender_id) : undefined;
       const repliedMessage = msg.reply_to_id ? repliedMessagesMap.get(msg.reply_to_id) : undefined;
-      const signedImageUrl = await signMessageMedia(msg.image_url);
+      // A single unsigned/failed media URL must not fail the whole page.
+      const signedImageUrl = await signMessageMedia(msg.image_url).catch(() => msg.image_url);
       return {
         ...msg,
         image_url: signedImageUrl,
@@ -1225,12 +1227,40 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     } catch (enrichError) {
       // Enrichment (profiles/reactions/media signing) is best-effort: fall
       // back to the raw fetched rows so a failure in an optimization can
-      // never keep message history from rendering.
+      // never keep message history from rendering. Sender names and media
+      // signing are still attempted per-message with their own guards.
       console.error("Error enriching messages:", enrichError);
-      messagesWithSenders = ((data || []) as any[]).slice().reverse().map((msg) => ({
-        ...msg,
-        reactions: [],
-        _status: "sent" as const,
+      const fallbackSenderIds = [...new Set((data || []).map((m: any) => m.sender_id).filter((id: string | null) => id && id !== user?.id))] as string[];
+      let fallbackProfiles: Profile[] = [];
+      if (fallbackSenderIds.length) {
+        try {
+          const { data: rows } = await supabase
+            .from("profiles")
+            .select("id, username, display_name, avatar_url")
+            .in("id", fallbackSenderIds);
+          fallbackProfiles = (rows as Profile[]) || [];
+        } catch {
+          // Names are cosmetic; continue without them.
+        }
+      }
+      const fallbackProfilesMap = new Map(fallbackProfiles.map((p) => [p.id, p]));
+      messagesWithSenders = await Promise.all(((data || []) as any[]).slice().reverse().map(async (msg: any) => {
+        const sender = msg.sender_id === user?.id ? ownSenderProfile : msg.sender_id ? fallbackProfilesMap.get(msg.sender_id) : undefined;
+        const signedImageUrl = await signMessageMedia(msg.image_url).catch(() => msg.image_url);
+        return {
+          ...msg,
+          image_url: signedImageUrl,
+          sender: sender ? { username: sender.username, display_name: sender.display_name, avatar_url: sender.avatar_url } : undefined,
+          reactions: [],
+          replied_message: undefined,
+          _status: !showReceipts
+            ? ("sent" as const)
+            : msg.read_at
+              ? ("read" as const)
+              : (msg as any).delivered_at
+                ? ("delivered" as const)
+                : ("sent" as const),
+        } as Message;
       }));
     }
 
@@ -1403,7 +1433,8 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     }
 
     const tempId = crypto.randomUUID();
-    const optimisticImageUrl = imageUrlJson ? await signMessageMedia(imageUrlJson) : null;
+    // Signing is best-effort — never let it block sending the message.
+    const optimisticImageUrl = imageUrlJson ? await signMessageMedia(imageUrlJson).catch(() => imageUrlJson) : null;
     const optimisticMessage: Message = {
       id: tempId,
       content: contentToSend,
