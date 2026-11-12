@@ -1,6 +1,25 @@
 # Veyra Releases
 
-GitHub Releases are the public update source for the Windows desktop and Android apps. A release is created by pushing a semantic version tag in the form `vMAJOR.MINOR.PATCH`, for example `v1.1.8`. The release workflow builds both apps, attaches their installers, generates `latest.json`, and publishes the release. Pull request and branch builds do not publish releases.
+GitHub Releases are the public update source for the Windows desktop and Android apps. A release is created by pushing a semantic version tag in the form `vMAJOR.MINOR.PATCH`, for example `v1.2.0`. The release workflow builds both apps, attaches their installers, generates `latest.json`, and publishes the release. Pull request and branch builds do not publish releases.
+
+## Veyra 1.2.0 (upcoming)
+
+Reliability, security, and experience update. Highlights:
+
+- **Message encryption at rest:** message content in DMs, group chats, Global Chat, and announcements is encrypted with AES-256-GCM before storage in MariaDB (`MESSAGE_ENCRYPTION_KEY`). This is not end-to-end encryption; see `docs/message-encryption.md`.
+- **Redis rate limiting:** auth endpoint limits are shared across API instances when `REDIS_URL` is configured, with in-memory fallback.
+- **Session management:** users can list and revoke sessions (`GET /api/auth/sessions`, `POST /api/auth/sessions/revoke`); password changes now revoke all sessions.
+- **Optional Altare Queues:** environment-gated background job publishing for notifications, disabled by default with inline fallback (`docs/queues.md`).
+- **Realtime resilience:** clients resync conversation history when the realtime channel recovers, and presence heartbeats keep online/typing state fresh.
+- **Desktop updater:** non-blocking update check with a dedicated progress window, download status, and retry/failure handling instead of a silent startup install.
+- **Android updater:** update prompt now shows release details and surfaces check/download failures.
+- **CI:** pull requests run lint, server tests, and a production build.
+
+### Downloads (once published)
+
+- Windows: `Veyra1.2.0.exe`
+- Android: `AndroidVeyra1.2.0.apk`
+- Update metadata: `latest.json`
 
 ## Veyra 1.1.8
 
@@ -66,7 +85,7 @@ Metadata shape:
 }
 ```
 
-The workflow generates the metadata URLs from the repository and tag. Do not hand-edit `latest.json` or upload a different asset name. Desktop checks the public latest release on startup and installs a newer version automatically. Android asks before opening the APK download; the user then confirms installation in Android. Choosing **Remind me later** dismisses the prompt for that app run; it checks again next launch.
+The workflow generates the metadata URLs from the repository and tag. Do not hand-edit `latest.json` or upload a different asset name. Desktop shows a dedicated update window after launch: it reports the available version, downloads with live progress, and only installs after the user chooses **Restart to update**; failures offer retry or defer to the next launch. Android shows release details and opens the APK download after confirmation; the user then confirms installation in Android. Choosing **Later** dismisses the prompt; both apps check again on the next launch.
 
 ## Troubleshooting
 

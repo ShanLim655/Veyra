@@ -11,7 +11,9 @@ Desktop and Android installers are built and released through GitHub Actions. Se
 - **Sequenzy** sends account verification and password reset emails through its transactional API.
 - **Supabase Storage** stores avatars, banners, chat images, videos, and voice messages.
 - **Node.js** API and MariaDB power accounts and application data. The API can run on a server or as a Vercel Function.
-- **Supabase Realtime** carries presence and lightweight, member-scoped MariaDB change notices. Redis provides short-lived authenticated read caching, request coalescing, and a bounded retry queue for change notices; MariaDB remains the permanent source of truth.
+- **Supabase Realtime** carries presence and lightweight, member-scoped MariaDB change notices. Redis provides short-lived authenticated read caching, request coalescing, shared rate limiting, and a bounded retry queue for change notices; MariaDB remains the permanent source of truth.
+- **Message content encryption:** sensitive message text (`messages`, `global_messages`, `announcement_messages` content and poll questions) is encrypted with AES-256-GCM on the server before reaching MariaDB. This is encryption at rest, not end-to-end encryption — the API decrypts for authorized reads and moderation. See [docs/message-encryption.md](docs/message-encryption.md).
+- **Optional Altare Queues:** background jobs such as notification delivery can be published to an external queue, fully disabled by default with inline fallback. See [docs/queues.md](docs/queues.md).
 
 MariaDB, Google OAuth, and Sequenzy credentials stay on the server. The browser uses Supabase for Storage, presence, and receiving scoped change notices.
 
@@ -58,6 +60,16 @@ Set `REDIS_URL` in `.env.local` and the production API environment to enable Red
 Redis read caching is restricted to results up to 256 KB and expires after two seconds. Each table has a generation key so a write invalidates older cached results across API instances. In-flight identical reads are coalesced per warm function instance; user ID and the complete query payload are part of the key, preserving authorization and pagination boundaries. Do not enable Redis eviction policies that can evict the stream outbox before acknowledged events are sent; MariaDB history still repairs missed live events.
 
 See [Redis operations and configuration](docs/redis.md) for connection setup, fallback behavior, and capacity notes.
+
+### Message encryption and optional queues
+
+Set `MESSAGE_ENCRYPTION_KEY` (base64, 32 bytes) in the API runtime environment to encrypt message content before it is stored in MariaDB; `MESSAGE_ENCRYPTION_KEY_PREVIOUS` accepts comma-separated older keys for rotation. Without it, the API warns at startup and stores content unencrypted, and pre-existing plaintext messages always remain readable. Full details, including what is and is not encrypted, are in [docs/message-encryption.md](docs/message-encryption.md).
+
+Altare Queues integration is off unless `ALTARE_QUEUES_ENABLED=true` and `ALTARE_QUEUES_URL` point at a queue service. When disabled, nothing connects to a queue and notification delivery runs inline. See [docs/queues.md](docs/queues.md) for the worker contract.
+
+### Sessions and rate limiting
+
+Sessions are stored hashed in MariaDB (`auth_sessions`, 30-day expiry). Signed-in users can list their sessions with `GET /api/auth/sessions` and revoke one or all others with `POST /api/auth/sessions/revoke` (`{ "session_id": "..." }` or `{ "others": true }`). Changing or resetting a password revokes all sessions. Auth endpoints are rate limited per client IP; when `REDIS_URL` is configured the counters are shared across API instances, otherwise an in-memory fallback applies.
 
 In Supabase Dashboard:
 
@@ -138,7 +150,7 @@ The Node server can host the compiled frontend and API on `PORT` (default `3001`
 POST /api/maintenance/purge-expired-attachments
 ```
 
-The cleanup marks chat attachments older than 14 days as expired and exempts admins. Without a cron secret, a signed-in `super_admin` can call the endpoint. ntfy server URL and notification preferences are stored in MariaDB; the server restricts outbound ntfy hosts to the configured supported servers.
+The cleanup marks chat attachments older than 14 days as expired and exempts admins. The same authorized call also removes expired sessions, native pairing codes, and email tokens. Without a cron secret, a signed-in `super_admin` can call the endpoint. ntfy server URL and notification preferences are stored in MariaDB; the server restricts outbound ntfy hosts to the configured supported servers.
 
 ## Scripts
 
@@ -150,6 +162,7 @@ The cleanup marks chat attachments older than 14 days as expired and exempts adm
 | `npm run db:migrate` | Initialize the MariaDB schema |
 | `npm run db:import:legacy` | Import Supabase Postgres app tables into MariaDB |
 | `npm run lint` | Run ESLint |
+| `npm test` | Run server unit tests |
 
 The `supabase/migrations/` and `supabase/functions/` directories contain historical PostgreSQL material plus documented Storage-only changes. Do not run `supabase db push` for application tables. Make MariaDB schema changes in `database/schema.sql`.
 

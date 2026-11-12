@@ -108,7 +108,7 @@ export default function AvatarCropDialog({
   };
   const onPointerUp = (e: React.PointerEvent) => {
     dragRef.current = null;
-    try { (e.target as Element).releasePointerCapture(e.pointerId); } catch {}
+    try { (e.target as Element).releasePointerCapture(e.pointerId); } catch { /* pointer capture unavailable */ }
   };
 
   const handleZoom = (val: number[]) => {
