@@ -19,7 +19,7 @@ import { Plus, Trash2 } from "lucide-react";
 
 type Props = {
   trigger: React.ReactNode;
-  channel: "dm" | "global" | "announcements";
+  channel: "dm" | "global" | "announcement";
   conversationId?: string | null;
   messagesTable: "messages" | "global_messages" | "announcement_messages";
 };
@@ -64,6 +64,27 @@ export function CreatePollDialog({ trigger, channel, conversationId, messagesTab
     setBusy(true);
     try {
       const endsAt = new Date(Date.now() + days * 86400000).toISOString();
+      // Single-call path: the API creates the poll, options, and marker
+      // message in one transaction. Fall back to sequential inserts when the
+      // deployed API does not know the RPC yet.
+      const { data: rpcResult, error: rpcError } = await (supabase as any).rpc("create_poll", {
+        _channel: channel,
+        _conversation_id: channel === "dm" ? conversationId : null,
+        _question: q,
+        _options: cleanOpts,
+        _multiple_choice: multiple,
+        _ends_at: endsAt,
+      });
+
+      if (!rpcError && rpcResult?.poll_id) {
+        reset();
+        setOpen(false);
+        return;
+      }
+      if (rpcError && !/unsupported database action/i.test(rpcError.message || "")) {
+        throw rpcError;
+      }
+
       const { data: poll, error: pErr } = await (supabase as any)
         .from("polls")
         .insert({

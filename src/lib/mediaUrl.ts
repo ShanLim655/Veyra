@@ -96,8 +96,7 @@ export async function signChatUrl(
     });
     const result = await response.json() as { url?: string };
     if (!response.ok || !result.url) return url;
-    if (signedUrlCache.size >= 500) signedUrlCache.delete(signedUrlCache.keys().next().value!);
-    signedUrlCache.set(url, { url: result.url, expiresAt: Date.now() + expiresIn * 1000 - 60_000 });
+    storeSignedUrl(url, result.url, expiresIn);
     return result.url;
   })();
   signingRequests.set(url, request);
@@ -105,6 +104,75 @@ export async function signChatUrl(
     return await request;
   } finally {
     if (signingRequests.get(url) === request) signingRequests.delete(url);
+  }
+}
+
+function storeSignedUrl(url: string, signedUrl: string, expiresIn: number) {
+  if (signedUrlCache.size >= 500) signedUrlCache.delete(signedUrlCache.keys().next().value!);
+  signedUrlCache.set(url, { url: signedUrl, expiresAt: Date.now() + expiresIn * 1000 - 60_000 });
+}
+
+// Pull every raw storage URL out of a serialized message media payload so a
+// whole page of messages can be signed with a single API request.
+export function collectMediaUrls(serialized: string | null | undefined): string[] {
+  if (!serialized) return [];
+  let arr: string[];
+  try {
+    const parsed = JSON.parse(serialized);
+    arr = Array.isArray(parsed) ? parsed : [serialized];
+  } catch {
+    arr = [serialized];
+  }
+  const urls: string[] = [];
+  for (const item of arr) {
+    if (typeof item !== 'string') continue;
+    if (item.startsWith("audio:")) {
+      const without = item.slice(6);
+      const lastColon = without.lastIndexOf(":");
+      urls.push(lastColon > 0 ? without.slice(0, lastColon) : without);
+    } else if (item.startsWith("video:")) {
+      urls.push(item.slice(6));
+    } else if (item.startsWith("music:")) {
+      const meta = decodeMusic(item);
+      if (meta) urls.push(meta.url);
+    } else if (item.startsWith("file:")) {
+      const meta = decodeFile(item);
+      if (meta) urls.push(meta.url);
+    } else if (!item.startsWith("expired:")) {
+      urls.push(item);
+    }
+  }
+  return urls;
+}
+
+// Signs many chat media URLs in one request. Afterwards signChatUrl /
+// signMessageMedia resolve instantly from the cache for these URLs.
+export async function prefetchChatUrls(urls: string[]) {
+  const pending = [...new Set(urls)]
+    .map((url) => ({ url, parsed: parseStorageUrl(url) }))
+    .filter((entry): entry is { url: string; parsed: { bucket: string; path: string } } => Boolean(entry.parsed))
+    .filter(({ url }) => {
+      const cached = signedUrlCache.get(url);
+      return !cached || cached.expiresAt <= Date.now();
+    });
+  if (!pending.length) return;
+  for (let i = 0; i < pending.length; i += 50) {
+    const chunk = pending.slice(i, i + 50);
+    try {
+      const response = await apiFetch('/api/storage/chat-read', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: chunk.map(({ parsed }) => parsed) }),
+      });
+      const result = await response.json() as { urls?: Record<string, string> };
+      if (!response.ok || !result.urls) continue;
+      for (const { url, parsed } of chunk) {
+        const signed = result.urls[`${parsed.bucket}/${parsed.path}`];
+        if (signed) storeSignedUrl(url, signed, DEFAULT_EXPIRES_IN_SECONDS);
+      }
+    } catch {
+      // Individual signChatUrl calls still work as a fallback.
+    }
   }
 }
 

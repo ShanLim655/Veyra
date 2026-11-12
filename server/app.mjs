@@ -55,6 +55,34 @@ export function createApp() {
     try { await pool.query('SELECT 1'); res.json({ ok: true, database: 'connected' }); }
     catch { res.status(503).json({ ok: false, database: 'unavailable' }); }
   });
+  // Public release-metadata proxy. Clients (Android WebView, desktop, web)
+  // cannot always fetch GitHub release downloads directly — redirects to asset
+  // hosts break CORS — so the API fetches latest.json server-side and caches it.
+  const RELEASE_METADATA_URL = 'https://github.com/ShanLim655/Veyra/releases/latest/download/latest.json';
+  let releaseCache = { at: 0, body: null };
+  app.get('/api/app-version', async (_req, res) => {
+    try {
+      if (releaseCache.body && Date.now() - releaseCache.at < 5 * 60_000) {
+        return res.json(releaseCache.body);
+      }
+      const response = await fetch(RELEASE_METADATA_URL, {
+        signal: AbortSignal.timeout(6000),
+        headers: { accept: 'application/json' },
+      });
+      if (!response.ok) {
+        // Keep serving a stale copy rather than flapping between "no release"
+        // and an error when GitHub hiccups.
+        if (releaseCache.body) return res.json(releaseCache.body);
+        return res.status(404).json({ error: 'no_release' });
+      }
+      const body = await response.json();
+      releaseCache = { at: Date.now(), body };
+      res.json(body);
+    } catch {
+      if (releaseCache.body) return res.json(releaseCache.body);
+      res.status(503).json({ error: 'release_unavailable' });
+    }
+  });
   app.use('/api', async (req, res, next) => {
     if (req.path === '/health') return next();
     if (req.path === '/maintenance/purge-expired-attachments' && process.env.PURGE_CRON_SECRET && req.get('x-cron-secret') === process.env.PURGE_CRON_SECRET) {
@@ -159,24 +187,43 @@ export function createApp() {
     }
   });
   app.post('/api/storage/chat-read', async (req, res) => {
-    const { bucket, path } = req.body || {};
-    const parts = typeof path === 'string' ? path.split('/') : [];
-    if (!CHAT_UPLOAD_BUCKETS.has(bucket) || parts.length < 3 || parts.length > 8
-      || parts.some((part) => !part || part === '.' || part === '..') || path.length > 512) {
-      return res.status(400).json({ error: 'Invalid media path.' });
+    const storage = getSupabaseAdmin();
+    const batch = Array.isArray(req.body?.items) ? req.body.items.slice(0, 50) : null;
+    const items = batch || [req.body || {}];
+    const validated = [];
+    for (const item of items) {
+      const { bucket, path } = item || {};
+      const parts = typeof path === 'string' ? path.split('/') : [];
+      if (!CHAT_UPLOAD_BUCKETS.has(bucket) || parts.length < 3 || parts.length > 8
+        || parts.some((part) => !part || part === '.' || part === '..') || path.length > 512) {
+        return res.status(400).json({ error: 'Invalid media path.' });
+      }
+      validated.push({ bucket, path, scope: parts[1] });
     }
-    const scope = parts[1];
     try {
-      if (scope !== 'global' && scope !== 'announcements') {
+      // One membership lookup per conversation scope covers every item in the batch.
+      const scopes = [...new Set(validated.map((item) => item.scope))]
+        .filter((scope) => scope !== 'global' && scope !== 'announcements');
+      for (const scope of scopes) {
         const [members] = await pool.execute(
           'SELECT 1 FROM conversation_members WHERE conversation_id = ? AND user_id = ? LIMIT 1',
           [scope, req.user.id],
         );
         if (!members.length) return res.status(403).json({ error: 'You cannot access this conversation media.' });
       }
-      const { data, error } = await getSupabaseAdmin().storage.from(bucket).createSignedUrl(path, 3600);
-      if (error || !data?.signedUrl) return res.status(404).json({ error: 'Media is missing or unavailable.' });
-      res.set('Cache-Control', 'private, max-age=300').json({ url: data.signedUrl, expiresIn: 3600 });
+      const signed = await Promise.all(validated.map(async ({ bucket, path }) => {
+        const { data, error } = await storage.storage.from(bucket).createSignedUrl(path, 3600);
+        return { key: `${bucket}/${path}`, url: error ? null : data?.signedUrl || null };
+      }));
+      if (batch) {
+        const urls = {};
+        for (const entry of signed) if (entry.url) urls[entry.key] = entry.url;
+        res.set('Cache-Control', 'private, max-age=300').json({ urls, expiresIn: 3600 });
+        return;
+      }
+      const url = signed[0]?.url;
+      if (!url) return res.status(404).json({ error: 'Media is missing or unavailable.' });
+      res.set('Cache-Control', 'private, max-age=300').json({ url, expiresIn: 3600 });
     } catch (error) {
       console.error('Chat media read signing failed:', error);
       res.status(503).json({ error: 'Chat media storage is unavailable.' });

@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { pool } from './db.mjs';
+import { encryptField } from './encryption.mjs';
+import { notifyNewMessage } from './notifications.mjs';
 
 async function adminCheck(userId, connection = pool) {
   const [rows] = await connection.execute("SELECT 1 FROM user_roles WHERE user_id = ? AND role IN ('admin','super_admin') LIMIT 1", [userId]);
@@ -122,6 +124,7 @@ export async function callRpc(userId, name, args = {}) {
       await pool.execute('UPDATE profiles SET global_mentions_last_read_at = CURRENT_TIMESTAMP(3) WHERE id = ?', [userId]);
       return null;
     }
+    case 'create_poll': return createPoll(userId, args);
     case 'finalize_poll': {
       await pool.execute('UPDATE polls SET closed_at = COALESCE(closed_at, CURRENT_TIMESTAMP(3)) WHERE id = ? AND (created_by = ? OR ends_at <= CURRENT_TIMESTAMP(3) OR ? = 1)', [args._poll_id, userId, await adminCheck(userId) ? 1 : 0]);
       const [rows] = await pool.execute('SELECT closed_at FROM polls WHERE id = ?', [args._poll_id]);
@@ -132,6 +135,89 @@ export async function callRpc(userId, name, args = {}) {
       throw new Error('Session management is not available through the data RPC API.');
     default: throw new Error(`Unsupported database action: ${name}`);
   }
+}
+
+// Creates a poll, its options, and the marker message in one transaction so
+// poll creation is a single API round trip instead of 4-5 sequential calls.
+// Channel rules mirror data.mjs canInsert: dm requires membership, global is
+// open to everyone, announcement requires an admin role.
+async function createPoll(userId, args = {}) {
+  const channel = String(args._channel || '');
+  const question = String(args._question || '').trim();
+  const options = (Array.isArray(args._options) ? args._options : [])
+    .map((option) => String(option ?? '').trim())
+    .filter(Boolean);
+  const endsAt = new Date(args._ends_at);
+  const conversationId = channel === 'dm' ? String(args._conversation_id || '') : null;
+  if (!['dm', 'global', 'announcement'].includes(channel)) throw new Error('Invalid poll channel.');
+  if (channel === 'dm' && !conversationId) throw new Error('A conversation is required for direct-message polls.');
+  if (!question || question.length > 300) throw new Error('Poll question is required (300 characters max).');
+  if (options.length < 2 || options.length > 10) throw new Error('Polls need between 2 and 10 options.');
+  if (options.some((option) => option.length > 150)) throw new Error('Poll options must be 150 characters or fewer.');
+  if (Number.isNaN(endsAt.getTime()) || endsAt.getTime() <= Date.now() + 60_000) {
+    throw new Error('Poll end time must be at least a minute in the future.');
+  }
+
+  const connection = await pool.getConnection();
+  const pollId = randomUUID();
+  const messageId = randomUUID();
+  const messageTable = channel === 'dm' ? 'messages' : channel === 'announcement' ? 'announcement_messages' : 'global_messages';
+  // DATETIME(3) columns are stored/read in UTC; format matches mysql2 output.
+  const endsAtDb = endsAt.toISOString().slice(0, 23).replace('T', ' ');
+  try {
+    await connection.beginTransaction();
+    if (channel === 'dm') {
+      const [members] = await connection.execute(
+        'SELECT 1 FROM conversation_members WHERE conversation_id = ? AND user_id = ? LIMIT 1',
+        [conversationId, userId],
+      );
+      if (!members.length) throw new Error('You are not a member of this conversation.');
+    } else if (channel === 'announcement' && !await adminCheck(userId, connection)) {
+      throw new Error('Admin access required.');
+    }
+    await connection.execute(
+      'INSERT INTO polls (id, channel, conversation_id, created_by, question, multiple_choice, ends_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [pollId, channel, conversationId, userId, encryptField(question), args._multiple_choice ? 1 : 0, endsAtDb],
+    );
+    for (const [position, text] of options.entries()) {
+      await connection.execute(
+        'INSERT INTO poll_options (id, poll_id, text, position) VALUES (?, ?, ?, ?)',
+        [randomUUID(), pollId, text, position],
+      );
+    }
+    const marker = `[[poll:${pollId}]]`;
+    if (channel === 'dm') {
+      await connection.execute(
+        'INSERT INTO messages (id, conversation_id, sender_id, content) VALUES (?, ?, ?, ?)',
+        [messageId, conversationId, userId, encryptField(marker)],
+      );
+    } else {
+      await connection.execute(
+        `INSERT INTO ${messageTable} (id, sender_id, content) VALUES (?, ?, ?)`,
+        [messageId, userId, encryptField(marker)],
+      );
+    }
+    await connection.execute('UPDATE polls SET message_id = ? WHERE id = ?', [messageId, pollId]);
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+
+  // Fire-and-forget, same as the data-API insert path. Plaintext marker keeps
+  // notification bodies identical to client-created polls.
+  const notificationRow = { id: messageId, conversation_id: conversationId, sender_id: userId, content: `[[poll:${pollId}]]` };
+  void notifyNewMessage(messageTable, notificationRow).catch((error) => console.error('Poll notification failed:', error));
+  // `message` mirrors what the data-API insert path returns so realtime
+  // broadcasts carry the same record shape (plaintext marker, as decrypted
+  // reads produce for clients).
+  return {
+    poll_id: pollId,
+    message_id: messageId,
+    message: { ...notificationRow, table: messageTable },
+  };
 }
 
 export async function ensureDirectMessage(userId, otherId) {

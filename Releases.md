@@ -2,6 +2,23 @@
 
 GitHub Releases are the public update source for the Windows desktop and Android apps. A release is created by pushing a semantic version tag in the form `vMAJOR.MINOR.PATCH`, for example `v1.2.0`. The release workflow builds both apps, attaches their installers, generates `latest.json`, and publishes the release. Pull request and branch builds do not publish releases.
 
+## Veyra 1.2.1 (upcoming)
+
+Hotfix release on top of 1.2.0:
+
+- **Android update checker:** release metadata is now fetched through the Veyra API (`GET /api/app-version`) instead of directly from GitHub, fixing "Veyra could not reach the release server" caused by CORS-blocked release download redirects in the Android WebView. The desktop updater uses the same endpoint.
+- **Announcement polls:** fixed poll creation in Announcements (channel naming mismatch rejected by the backend) and polls now update live for all viewers.
+- **Poll display:** hardened date parsing so polls and messages no longer show "Invalid Date", and polls that cannot be loaded show a clear unavailable state instead of loading forever.
+- **Faster polls:** poll creation is a single transactional API call instead of 4–5 sequential requests.
+- **Faster chat loading:** media URLs in a message page are signed with one batched request instead of one request per message.
+- **Desktop updater:** updates now download automatically with live progress (Discord-style), re-prompt if the window was closed mid-download, and re-check every 6 hours.
+
+### Downloads (once published)
+
+- Windows: `Veyra1.2.1.exe`
+- Android: `AndroidVeyra1.2.1.apk`
+- Update metadata: `latest.json`
+
 ## Veyra 1.2.0 (upcoming)
 
 Reliability, security, and experience update. Highlights:

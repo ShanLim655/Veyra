@@ -52,9 +52,10 @@ import {
   ChevronLeft, ChevronRight, Play, Mic, Pin, Copy
 } from "lucide-react";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
-import { signMessageMedia, encodeFile, decodeFile, encodeMusic, decodeMusic } from "@/lib/mediaUrl";
+import { signMessageMedia, encodeFile, decodeFile, encodeMusic, decodeMusic, collectMediaUrls, prefetchChatUrls } from "@/lib/mediaUrl";
 import { compressImageForUpload } from "@/lib/imageCompress";
 import { getCachedMessages, setCachedMessages } from "@/lib/chatCache";
+import { parseServerDate, serverDateMs } from "@/lib/dates";
 import { exceedsMaxUploadSize, MAX_UPLOAD_SIZE_LABEL } from "@/lib/uploadLimits";
 import { MessageFileCard } from "@/components/chat/MessageFileCard";
 import { ChatImage } from "@/components/chat/ChatImage";
@@ -291,7 +292,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     const load = async () => {
       let q = (supabase as any).from("polls").select("id, message_id, result_message_id, channel, conversation_id");
       if (isDM) q = q.eq("channel", "dm").eq("conversation_id", conversationIdProp);
-      else if (isAnnouncements) q = q.eq("channel", "announcements");
+      else if (isAnnouncements) q = q.eq("channel", "announcement");
       else q = q.eq("channel", "global");
       const { data } = await q;
       if (cancelled || !data) return;
@@ -582,15 +583,15 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
           _status: 'sent',
         };
         return next.sort((left, right) =>
-          new Date(left.created_at).getTime() - new Date(right.created_at).getTime());
+          serverDateMs(left.created_at) - serverDateMs(right.created_at));
       }
 
-      if (!previous.length || new Date(previous[previous.length - 1].created_at) <= new Date(incoming.created_at)) {
+      if (!previous.length || serverDateMs(previous[previous.length - 1].created_at) <= serverDateMs(incoming.created_at)) {
         return [...previous, incoming];
       }
       const next = [...previous, incoming];
       return next.sort((left, right) =>
-        new Date(left.created_at).getTime() - new Date(right.created_at).getTime());
+        serverDateMs(left.created_at) - serverDateMs(right.created_at));
     });
   }, [user?.id]);
 
@@ -1160,6 +1161,9 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     // chat load wait through multiple database round trips in sequence.
     const [reactionsMap, profileResult, repliedResult] = await Promise.all([
       fetchReactions(messageIds),
+      // Sign every media URL in the page with one batched request instead of
+      // one API call per message.
+      prefetchChatUrls((data || []).flatMap((m: any) => collectMediaUrls(m.image_url))),
       senderIds.length > 0
         ? supabase
           .from("profiles")
@@ -1250,7 +1254,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
         for (const m of prev) merged.set(m.id, m);
         for (const m of messagesWithSenders) merged.set(m.id, m);
         return Array.from(merged.values()).sort(
-          (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+          (a, b) => serverDateMs(a.created_at) - serverDateMs(b.created_at),
         );
       });
     }
@@ -1654,7 +1658,8 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   };
 
   const formatMessageDate = (dateString: string) => {
-    const date = new Date(dateString);
+    const date = parseServerDate(dateString);
+    if (!date) return dateString;
     const now = new Date();
     const isToday = date.toDateString() === now.toDateString();
     const yesterday = new Date(now);
@@ -1673,7 +1678,8 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   };
 
   const getDateLabel = (dateString: string) => {
-    const date = new Date(dateString);
+    const date = parseServerDate(dateString);
+    if (!date) return "";
     const now = new Date();
     const isToday = date.toDateString() === now.toDateString();
     const yesterday = new Date(now);
@@ -1686,9 +1692,10 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
 
   const shouldShowDateLabel = (index: number) => {
     if (index === 0) return true;
-    const current = new Date(messages[index].created_at).toDateString();
-    const previous = new Date(messages[index - 1].created_at).toDateString();
-    return current !== previous;
+    const current = serverDateMs(messages[index].created_at);
+    const previous = serverDateMs(messages[index - 1].created_at);
+    if (Number.isNaN(current) || Number.isNaN(previous)) return false;
+    return new Date(current).toDateString() !== new Date(previous).toDateString();
   };
 
 
@@ -2036,7 +2043,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
             const continuesReadChain = message._status === "read"
               && nextMessage?.sender_id === message.sender_id
               && nextMessage._status === "read"
-              && new Date(nextMessage.created_at).getTime() - new Date(message.created_at).getTime() <= 5 * 60 * 1000;
+              && serverDateMs(nextMessage.created_at) - serverDateMs(message.created_at) <= 5 * 60 * 1000;
             const isEditing = editingMessageId === message.id;
             const groupedReactions = groupReactions(message.reactions || []);
 
@@ -2754,7 +2761,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
             </Button>
             {canPost && (
               <CreatePollDialog
-                channel={isDM ? "dm" : isAnnouncements ? "announcements" : "global"}
+                channel={isDM ? "dm" : isAnnouncements ? "announcement" : "global"}
                 conversationId={conversationIdProp}
                 messagesTable={messagesTable}
                 trigger={

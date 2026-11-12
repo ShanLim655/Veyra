@@ -13,7 +13,10 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 
-const RELEASE_URL = 'https://github.com/ShanLim655/Veyra/releases/latest/download/latest.json';
+// Served by the Veyra API, which fetches the GitHub release metadata
+// server-side. Fetching github.com directly fails in the Android WebView
+// because release downloads redirect to asset hosts without CORS headers.
+const RELEASE_URL = '/api/app-version';
 const INSTALLED_VERSION = import.meta.env.VITE_APP_VERSION || '0.0.0';
 
 function compareVersions(left: string, right: string) {
@@ -43,7 +46,8 @@ export function AndroidUpdateCheck() {
     void (async () => {
       try {
         const response = await fetch(RELEASE_URL, { cache: 'no-store' });
-        if (!response.ok) return;
+        if (response.status === 404) return; // No published release yet.
+        if (!response.ok) throw new Error(`Release check failed (HTTP ${response.status}).`);
         const info = await response.json() as ReleaseInfo;
         if (cancelled || !info.version || !info.android?.url || compareVersions(info.version, INSTALLED_VERSION) <= 0) return;
         setRelease(info);

@@ -8,7 +8,9 @@ const { pipeline } = require('node:stream/promises');
 
 const APP_URL = 'https://veyra-pink-mu.vercel.app';
 const APP_ORIGIN = new URL(APP_URL).origin;
-const RELEASE_METADATA = 'https://github.com/ShanLim655/Veyra/releases/latest/download/latest.json';
+// Proxied through the Veyra API so the check works even when GitHub release
+// downloads are unreachable or redirect in ways fetch cannot follow.
+const RELEASE_METADATA = `${APP_ORIGIN}/api/app-version`;
 const SESSION_PATH = path.join(app.getPath('userData'), 'session.dat');
 const UPDATE_PAGE = path.join(__dirname, 'update.html');
 let updateInstalling = false;
@@ -96,7 +98,10 @@ function compareVersions(left, right) {
   return 0;
 }
 
+let lastUpdateState = null;
+
 function sendUpdateState(state) {
+  lastUpdateState = state;
   if (updateWindow && !updateWindow.isDestroyed()) {
     updateWindow.webContents.send('veyra:update-state', state);
   }
@@ -123,6 +128,11 @@ function ensureUpdateWindow() {
   });
   updateWindow.on('closed', () => { updateWindow = null; });
   void updateWindow.loadFile(UPDATE_PAGE);
+  // States emitted while the page was still loading are replayed once the
+  // renderer is ready so rapid transitions (available -> downloading) are not lost.
+  updateWindow.webContents.once('did-finish-load', () => {
+    if (lastUpdateState) updateWindow?.webContents.send('veyra:update-state', lastUpdateState);
+  });
   return updateWindow;
 }
 
@@ -158,6 +168,9 @@ async function runDownload(release) {
         percent: total > 0 ? Math.min(100, Math.round((received / total) * 100)) : null,
       });
     });
+    // Re-open the update window if the user dismissed it mid-download so the
+    // "Restart to update" prompt is never silently lost.
+    ensureUpdateWindow();
     sendUpdateState({ stage: 'ready', version: release.version, notes: release.notes || release.name || null });
   } catch (error) {
     pendingInstallerPath = null;
@@ -181,15 +194,10 @@ async function checkForUpdates() {
   if (!release?.version || !release.windows?.url || compareVersions(release.version, app.getVersion()) <= 0) return;
 
   pendingRelease = release;
-  const state = {
-    stage: 'available',
-    version: release.version,
-    currentVersion: app.getVersion(),
-    notes: release.notes || release.name || null,
-  };
   ensureUpdateWindow();
-  updateWindow?.webContents.once('did-finish-load', () => sendUpdateState(state));
-  sendUpdateState(state);
+  // Discord-style flow: start downloading immediately and let the window show
+  // live progress instead of waiting for a click.
+  void runDownload(release);
 }
 
 function installPendingUpdate() {
@@ -252,8 +260,11 @@ app.whenReady().then(async () => {
   if (!app.isDefaultProtocolClient('veyra')) app.setAsDefaultProtocolClient('veyra');
   createWindow();
   // Update checks run in the background so a slow or unreachable release
-  // feed can never block or break app startup.
+  // feed can never block or break app startup. Re-check every 6 hours so a
+  // release published while Veyra stays open is still picked up.
   void checkForUpdates();
+  const updateTimer = setInterval(() => void checkForUpdates(), 6 * 60 * 60 * 1000);
+  updateTimer.unref?.();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

@@ -1,3 +1,5 @@
+import { serverDateMs } from "@/lib/dates";
+
 export interface CustomStatusData {
   custom_status_text: string | null;
   custom_status_emoji: string | null;
@@ -8,7 +10,8 @@ export function isStatusActive(s: Partial<CustomStatusData> | null | undefined):
   if (!s) return false;
   if (!s.custom_status_text) return false;
   if (!s.custom_status_expires_at) return true;
-  return new Date(s.custom_status_expires_at).getTime() > Date.now();
+  const expiresMs = serverDateMs(s.custom_status_expires_at);
+  return Number.isNaN(expiresMs) ? false : expiresMs > Date.now();
 }
 
 export type DurationPreset = "1h" | "4h" | "24h" | "never" | "custom";

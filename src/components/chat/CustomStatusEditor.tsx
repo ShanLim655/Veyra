@@ -27,6 +27,7 @@ import {
   isStatusActive,
 } from "@/lib/customStatus";
 import { cn } from "@/lib/utils";
+import { parseServerDate } from "@/lib/dates";
 
 interface Props {
   initial: CustomStatusData | null;
@@ -40,11 +41,10 @@ export function CustomStatusEditor({ initial, onClose, onSaved }: Props) {
   const [emoji, setEmoji] = useState<string>(initial?.custom_status_emoji || "");
   const [text, setText] = useState<string>(initial?.custom_status_text || "");
   const [duration, setDuration] = useState<DurationPreset>(active ? "never" : "24h");
-  const [customDate, setCustomDate] = useState<Date | undefined>(
-    initial?.custom_status_expires_at ? new Date(initial.custom_status_expires_at) : undefined
-  );
+  const initialExpiry = parseServerDate(initial?.custom_status_expires_at);
+  const [customDate, setCustomDate] = useState<Date | undefined>(initialExpiry || undefined);
   const [customTime, setCustomTime] = useState<string>(() => {
-    const d = initial?.custom_status_expires_at ? new Date(initial.custom_status_expires_at) : new Date(Date.now() + 60 * 60 * 1000);
+    const d = initialExpiry || new Date(Date.now() + 60 * 60 * 1000);
     return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   });
   const [emojiOpen, setEmojiOpen] = useState(false);

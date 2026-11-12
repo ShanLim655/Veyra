@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { subscribeMariaDbChanges } from "@/integrations/supabase/mariadb-realtime";
+import { serverDateMs } from "@/lib/dates";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import {
@@ -30,7 +32,9 @@ type VoterProfile = { id: string; username: string | null; display_name: string 
 
 function formatTimeLeft(endsAt: string, closedAt: string | null) {
   if (closedAt) return "Closed";
-  const ms = new Date(endsAt).getTime() - Date.now();
+  const endMs = serverDateMs(endsAt);
+  if (Number.isNaN(endMs)) return "";
+  const ms = endMs - Date.now();
   if (ms <= 0) return "Ended";
   const d = Math.floor(ms / 86400000);
   const h = Math.floor((ms % 86400000) / 3600000);
@@ -48,6 +52,8 @@ export function PollCard({ pollId }: { pollId: string }) {
   const [busy, setBusy] = useState(false);
   const [votersOpen, setVotersOpen] = useState<{ optionId: string; text: string } | null>(null);
   const [voterProfiles, setVoterProfiles] = useState<VoterProfile[]>([]);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const finalizeAttempted = useRef(false);
   const [, force] = useState(0);
 
   // Tick clock every 30s for countdown
@@ -69,27 +75,34 @@ export function PollCard({ pollId }: { pollId: string }) {
       setPoll(p);
       setOptions(o || []);
       setVotes(v || []);
+      setLoadFailed(!p);
     };
     load();
 
-    const ch = supabase
-      .channel(`poll:${pollId}:${Math.random().toString(36).slice(2)}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "poll_votes", filter: `poll_id=eq.${pollId}` }, load)
-      .on("postgres_changes", { event: "*", schema: "public", table: "polls", filter: `id=eq.${pollId}` }, load)
-      .on("postgres_changes", { event: "*", schema: "public", table: "poll_options", filter: `poll_id=eq.${pollId}` }, load)
-      .subscribe();
+    // Live updates come through the MariaDB realtime bridge (the old
+    // postgres_changes subscriptions never fired after the Supabase
+    // migration). Any change just triggers a refetch.
+    const unsubscribes = [
+      subscribeMariaDbChanges({ event: "*", schema: "public", table: "polls", filter: `id=eq.${pollId}` }, load),
+      subscribeMariaDbChanges({ event: "*", schema: "public", table: "poll_options", filter: `poll_id=eq.${pollId}` }, load),
+      subscribeMariaDbChanges({ event: "*", schema: "public", table: "poll_votes", filter: `poll_id=eq.${pollId}` }, load),
+    ];
 
     return () => {
       cancelled = true;
-      supabase.removeChannel(ch);
+      unsubscribes.forEach((unsubscribe) => unsubscribe());
     };
   }, [pollId]);
 
-  // Auto-finalize when expired
+  // Auto-finalize when expired. result_message_id is never populated by the
+  // current backend, so guard with a ref to avoid calling the RPC on every
+  // render/tick forever.
   useEffect(() => {
-    if (!poll) return;
-    const ended = !!poll.closed_at || new Date(poll.ends_at).getTime() <= Date.now();
+    if (!poll || finalizeAttempted.current) return;
+    const endMs = serverDateMs(poll.ends_at);
+    const ended = !!poll.closed_at || (!Number.isNaN(endMs) && endMs <= Date.now());
     if (ended && !poll.result_message_id) {
+      finalizeAttempted.current = true;
       Promise.resolve((supabase as any).rpc("finalize_poll", { _poll_id: pollId })).catch(() => {});
     }
   }, [poll, pollId]);
@@ -106,7 +119,8 @@ export function PollCard({ pollId }: { pollId: string }) {
     () => new Set(votes.filter((v) => v.user_id === user?.id).map((v) => v.option_id)),
     [votes, user?.id]
   );
-  const ended = !!poll?.closed_at || (poll ? new Date(poll.ends_at).getTime() <= Date.now() : false);
+  const endMs = poll ? serverDateMs(poll.ends_at) : Number.NaN;
+  const ended = !!poll?.closed_at || (!Number.isNaN(endMs) && endMs <= Date.now());
   const isCreator = poll?.created_by === user?.id;
 
   const toggleVote = async (optionId: string) => {
@@ -171,10 +185,12 @@ export function PollCard({ pollId }: { pollId: string }) {
   if (!poll) {
     return (
       <div className="rounded-xl border border-border bg-card/60 p-3 mt-1 text-xs text-muted-foreground">
-        Loading poll…
+        {loadFailed ? "This poll is unavailable." : "Loading poll…"}
       </div>
     );
   }
+
+  const timeLeft = formatTimeLeft(poll.ends_at, poll.closed_at);
 
   return (
     <>
@@ -184,8 +200,8 @@ export function PollCard({ pollId }: { pollId: string }) {
           <div className="flex-1 min-w-0">
             <p className="font-semibold text-sm leading-snug break-words">{poll.question}</p>
             <p className="text-[11px] text-muted-foreground mt-0.5">
-              {poll.multiple_choice ? "Multiple choice" : "Single choice"} •{" "}
-              {formatTimeLeft(poll.ends_at, poll.closed_at)}
+              {poll.multiple_choice ? "Multiple choice" : "Single choice"}
+              {timeLeft ? ` • ${timeLeft}` : ""}
             </p>
           </div>
         </div>
