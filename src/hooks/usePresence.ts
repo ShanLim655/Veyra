@@ -17,6 +17,7 @@ export function usePresence(conversationId: string | null) {
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const typingExpiryRef = useRef(new Map<string, number>());
   const trackQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const lastTypingRef = useRef<{ typing_in?: string | null; typing_until?: number }>({ typing_until: 0 });
 
   useEffect(() => {
     if (!user || !conversationId) return;
@@ -52,10 +53,22 @@ export function usePresence(conversationId: string | null) {
           await channel.track({
             user_id: user.id,
             online_at: new Date().toISOString(),
-            typing_until: 0,
+            typing_in: lastTypingRef.current.typing_in ?? null,
+            typing_until: lastTypingRef.current.typing_until ?? 0,
           });
         }
       });
+
+    // Refresh presence periodically so other clients see a live online_at
+    // instead of a stale entry, preserving the current typing state.
+    const heartbeat = window.setInterval(() => {
+      void channel.track({
+        user_id: user.id,
+        online_at: new Date().toISOString(),
+        typing_in: lastTypingRef.current.typing_in ?? null,
+        typing_until: lastTypingRef.current.typing_until ?? 0,
+      }).catch(() => undefined);
+    }, 30000);
 
     const expiryTimer = window.setInterval(() => {
       const now = Date.now();
@@ -68,7 +81,9 @@ export function usePresence(conversationId: string | null) {
 
     return () => {
       window.clearInterval(expiryTimer);
+      window.clearInterval(heartbeat);
       typingExpiryRef.current.clear();
+      lastTypingRef.current = { typing_until: 0 };
       if (channelRef.current === channel) channelRef.current = null;
       supabase.removeChannel(channel);
     };
@@ -85,6 +100,7 @@ export function usePresence(conversationId: string | null) {
         typing_in: isTyping ? conversationId : null,
         typing_until: isTyping ? Date.now() + 5000 : 0,
       };
+      lastTypingRef.current = { typing_in: payload.typing_in, typing_until: payload.typing_until };
       trackQueueRef.current = trackQueueRef.current.catch(() => undefined).then(async () => {
         if (channelRef.current === channel) await channel.track(payload);
       });
@@ -98,7 +114,9 @@ export function usePresence(conversationId: string | null) {
 
 let globalPresenceChannel: ReturnType<typeof supabase.channel> | null = null;
 let globalOnlineUsersSet = new Set<string>();
-let globalPresenceListeners = new Set<(users: Set<string>) => void>();
+const globalPresenceListeners = new Set<(users: Set<string>) => void>();
+let globalPresenceUserId: string | null = null;
+let globalHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
 export function useGlobalPresence() {
   const { user } = useAuth();
@@ -110,6 +128,7 @@ export function useGlobalPresence() {
     globalPresenceListeners.add(listener);
     if (!globalPresenceChannel) {
       globalPresenceChannel = supabase.channel("global-presence");
+      globalPresenceUserId = user.id;
 
       globalPresenceChannel
         .on("presence", { event: "sync" }, () => {
@@ -133,17 +152,41 @@ export function useGlobalPresence() {
             });
           }
         });
+
+      // Keep online_at fresh so peers do not see a stale presence entry.
+      globalHeartbeatTimer = setInterval(() => {
+        const currentUserId = globalPresenceUserId;
+        if (!currentUserId || !globalPresenceChannel) return;
+        void globalPresenceChannel.track({
+          user_id: currentUserId,
+          online_at: new Date().toISOString(),
+        }).catch(() => undefined);
+      }, 60000);
     } else {
-      globalPresenceChannel.track({
+      globalPresenceUserId = user.id;
+      void globalPresenceChannel.track({
         user_id: user.id,
         online_at: new Date().toISOString(),
-      });
+      }).catch(() => undefined);
     }
 
     setOnlineUsers(new Set(globalOnlineUsersSet));
 
     return () => {
       globalPresenceListeners.delete(listener);
+      // Tear the shared channel down once the last consumer unmounts so a
+      // signed-out or idle client does not linger as "online".
+      if (globalPresenceListeners.size === 0 && globalPresenceChannel) {
+        const channel = globalPresenceChannel;
+        globalPresenceChannel = null;
+        globalPresenceUserId = null;
+        globalOnlineUsersSet = new Set();
+        if (globalHeartbeatTimer) {
+          clearInterval(globalHeartbeatTimer);
+          globalHeartbeatTimer = null;
+        }
+        void supabase.removeChannel(channel);
+      }
     };
   }, [user]);
 

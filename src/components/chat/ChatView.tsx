@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useLayoutEffect, useMemo } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { onMariaDbRealtimeReconnect } from "@/integrations/supabase/mariadb-realtime";
 import { apiFetch } from "@/lib/nativeSession";
 import { useAuth } from "@/hooks/useAuth";
 import { useUserRole } from "@/hooks/useUserRole";
@@ -833,6 +834,14 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       };
     }
   }, [conversationId, conversationIdProp, isDM, supportsPinning, messagesTable, showReceipts, user, isActive, ownSenderProfile, reconcileLiveMessage]);
+
+  // Broadcasts missed while the realtime channel was down are not replayed,
+  // so resync the visible conversation whenever the channel recovers.
+  useEffect(() => onMariaDbRealtimeReconnect(() => {
+    if (!isActive || !conversationId) return;
+    void fetchMessagesRef.current?.();
+    if (supportsPinning) void fetchPinnedMessages();
+  }), [isActive, conversationId, supportsPinning, fetchPinnedMessages]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     const viewport = scrollAreaRef.current?.querySelector(
@@ -2093,7 +2102,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                     (e.currentTarget as any).__lpStart = { x: startX, y: startY };
                     longPressFiredRef.current = false;
                     if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
-                    try { window.getSelection()?.removeAllRanges(); } catch {}
+                    try { window.getSelection()?.removeAllRanges(); } catch { /* selection API unavailable */ }
                     swipeStateRef.current = null;
                     const bg = e.currentTarget.parentElement?.querySelector(`[data-swipe-bg="${message.id}"]`) as HTMLElement | null;
                     if (bg) { bg.style.opacity = '0'; bg.style.transition = ''; }
@@ -2101,8 +2110,8 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                     e.currentTarget.style.transition = '';
                     longPressTimerRef.current = setTimeout(() => {
                       longPressFiredRef.current = true;
-                      try { (navigator as any).vibrate?.(15); } catch {}
-                      try { window.getSelection()?.removeAllRanges(); } catch {}
+                      try { (navigator as any).vibrate?.(15); } catch { /* vibration unavailable */ }
+                      try { window.getSelection()?.removeAllRanges(); } catch { /* selection API unavailable */ }
                       setMobileActionMessage(message);
                     }, 400);
                   }}

@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Veyra Update</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #0b0b0b;
+    color: #e7e7e7;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+  }
+  .card { width: 100%; padding: 28px; }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+  .sub { font-size: 13px; color: #9a9a9a; margin-bottom: 18px; }
+  .notes {
+    background: #151515;
+    border: 1px solid #262626;
+    border-radius: 10px;
+    padding: 12px 14px;
+    font-size: 13px;
+    color: #cfcfcf;
+    white-space: pre-wrap;
+    max-height: 120px;
+    overflow-y: auto;
+    margin-bottom: 18px;
+  }
+  .bar-track { height: 8px; background: #222; border-radius: 999px; overflow: hidden; margin-bottom: 10px; }
+  .bar-fill { height: 100%; width: 0%; background: #6d5df6; border-radius: 999px; transition: width .2s ease; }
+  .progress-text { font-size: 12px; color: #9a9a9a; margin-bottom: 20px; }
+  .error { color: #f87171; font-size: 13px; margin-bottom: 18px; }
+  .actions { display: flex; gap: 10px; justify-content: flex-end; }
+  button {
+    font: inherit;
+    font-size: 13px;
+    padding: 9px 18px;
+    border-radius: 8px;
+    border: 1px solid #333;
+    background: #1c1c1c;
+    color: #e7e7e7;
+    cursor: pointer;
+  }
+  button:hover { background: #262626; }
+  button.primary { background: #6d5df6; border-color: #6d5df6; }
+  button.primary:hover { background: #7d6df8; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1 id="title">Veyra Update</h1>
+    <p class="sub" id="subtitle"></p>
+    <div class="notes" id="notes" hidden></div>
+    <div class="bar-track" id="barTrack" hidden><div class="bar-fill" id="barFill"></div></div>
+    <p class="progress-text" id="progressText"></p>
+    <p class="error" id="errorText" hidden></p>
+    <div class="actions">
+      <button id="laterBtn" hidden>Later</button>
+      <button id="secondaryBtn" hidden></button>
+      <button id="primaryBtn" class="primary"></button>
+    </div>
+  </div>
+<script>
+  const els = {
+    title: document.getElementById('title'),
+    subtitle: document.getElementById('subtitle'),
+    notes: document.getElementById('notes'),
+    barTrack: document.getElementById('barTrack'),
+    barFill: document.getElementById('barFill'),
+    progressText: document.getElementById('progressText'),
+    errorText: document.getElementById('errorText'),
+    laterBtn: document.getElementById('laterBtn'),
+    secondaryBtn: document.getElementById('secondaryBtn'),
+    primaryBtn: document.getElementById('primaryBtn'),
+  };
+  const formatBytes = (bytes) => {
+    if (!bytes) return '';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let value = bytes; let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+    return `${value.toFixed(value >= 100 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+  };
+
+  function render(state) {
+    els.notes.hidden = true;
+    els.barTrack.hidden = true;
+    els.progressText.textContent = '';
+    els.errorText.hidden = true;
+    els.secondaryBtn.hidden = true;
+    els.laterBtn.hidden = true;
+    els.primaryBtn.onclick = null;
+
+    if (state.stage === 'available') {
+      els.title.textContent = `Veyra ${state.version} is available`;
+      els.subtitle.textContent = `You are running ${state.currentVersion || 'an older version'}.`;
+      if (state.notes) { els.notes.textContent = state.notes; els.notes.hidden = false; }
+      els.primaryBtn.textContent = 'Download update';
+      els.primaryBtn.onclick = () => window.veyraUpdate.choose('download');
+      els.laterBtn.hidden = false;
+      els.laterBtn.onclick = () => window.veyraUpdate.choose('later');
+    } else if (state.stage === 'downloading') {
+      els.title.textContent = `Downloading Veyra ${state.version}`;
+      els.subtitle.textContent = 'Please keep Veyra open until the download finishes.';
+      els.barTrack.hidden = false;
+      els.barFill.style.width = `${state.percent ?? 0}%`;
+      const received = formatBytes(state.received);
+      const total = formatBytes(state.total);
+      els.progressText.textContent = state.percent != null
+        ? `${state.percent}%${total ? ` — ${received} of ${total}` : ''}`
+        : `Downloaded ${received}`;
+      els.laterBtn.hidden = false;
+      els.laterBtn.onclick = () => window.veyraUpdate.choose('later');
+    } else if (state.stage === 'ready') {
+      els.title.textContent = `Veyra ${state.version} is ready`;
+      els.subtitle.textContent = 'The update has been downloaded. Restart Veyra to finish installing.';
+      if (state.notes) { els.notes.textContent = state.notes; els.notes.hidden = false; }
+      els.primaryBtn.textContent = 'Restart to update';
+      els.primaryBtn.onclick = () => window.veyraUpdate.choose('install');
+      els.laterBtn.hidden = false;
+      els.laterBtn.onclick = () => window.veyraUpdate.choose('later');
+    } else if (state.stage === 'error') {
+      els.title.textContent = 'Update failed';
+      els.subtitle.textContent = state.version ? `Veyra ${state.version} could not be installed.` : 'The update could not be installed.';
+      els.errorText.textContent = state.message || 'An unexpected error occurred.';
+      els.errorText.hidden = false;
+      els.primaryBtn.textContent = 'Retry';
+      els.primaryBtn.onclick = () => window.veyraUpdate.choose('retry');
+      els.laterBtn.hidden = false;
+      els.laterBtn.onclick = () => window.veyraUpdate.choose('later');
+    }
+  }
+
+  window.veyraUpdate.onState(render);
+</script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell, dialog, ipcMain, safeStorage } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, safeStorage } = require('electron');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -10,8 +10,11 @@ const APP_URL = 'https://veyra-pink-mu.vercel.app';
 const APP_ORIGIN = new URL(APP_URL).origin;
 const RELEASE_METADATA = 'https://github.com/ShanLim655/Veyra/releases/latest/download/latest.json';
 const SESSION_PATH = path.join(app.getPath('userData'), 'session.dat');
+const UPDATE_PAGE = path.join(__dirname, 'update.html');
 let updateInstalling = false;
 let mainWindow = null;
+let updateWindow = null;
+let pendingInstallerPath = null;
 const queuedPairCallbacks = [];
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (hasSingleInstanceLock) {
@@ -93,28 +96,126 @@ function compareVersions(left, right) {
   return 0;
 }
 
-async function updateBeforeLaunch() {
-  if (!app.isPackaged || process.platform !== 'win32') return;
+function sendUpdateState(state) {
+  if (updateWindow && !updateWindow.isDestroyed()) {
+    updateWindow.webContents.send('veyra:update-state', state);
+  }
+}
+
+function ensureUpdateWindow() {
+  if (updateWindow && !updateWindow.isDestroyed()) return updateWindow;
+  updateWindow = new BrowserWindow({
+    width: 480,
+    height: 380,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    autoHideMenuBar: true,
+    backgroundColor: '#0b0b0b',
+    title: 'Veyra Update',
+    webPreferences: {
+      preload: path.join(__dirname, 'update-preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  updateWindow.on('closed', () => { updateWindow = null; });
+  void updateWindow.loadFile(UPDATE_PAGE);
+  return updateWindow;
+}
+
+async function downloadInstaller(url, destination, onProgress) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(10 * 60 * 1000) });
+  if (!response.ok || !response.body) throw new Error(`The update download failed (HTTP ${response.status}).`);
+  const total = Number(response.headers.get('content-length')) || 0;
+  let received = 0;
+  const source = Readable.fromWeb(response.body);
+  source.on('data', (chunk) => {
+    received += chunk.length;
+    onProgress(received, total);
+  });
+  await pipeline(source, fs.createWriteStream(destination));
+  const size = fs.statSync(destination).size;
+  if (total > 0 && size !== total) {
+    try { fs.unlinkSync(destination); } catch {}
+    throw new Error('The update download was incomplete. Please try again.');
+  }
+  if (size <= 0) throw new Error('The update download was empty. Please try again.');
+}
+
+async function runDownload(release) {
+  const installer = path.join(os.tmpdir(), `Veyra-${release.version}-setup.exe`);
+  pendingInstallerPath = installer;
+  try {
+    await downloadInstaller(release.windows.url, installer, (received, total) => {
+      sendUpdateState({
+        stage: 'downloading',
+        version: release.version,
+        received,
+        total,
+        percent: total > 0 ? Math.min(100, Math.round((received / total) * 100)) : null,
+      });
+    });
+    sendUpdateState({ stage: 'ready', version: release.version, notes: release.notes || release.name || null });
+  } catch (error) {
+    pendingInstallerPath = null;
+    try { fs.unlinkSync(installer); } catch {}
+    sendUpdateState({ stage: 'error', version: release.version, message: error instanceof Error ? error.message : 'Download failed.' });
+  }
+}
+
+let pendingRelease = null;
+
+async function checkForUpdates() {
+  if (!app.isPackaged || process.platform !== 'win32' || updateInstalling) return;
+  let release;
   try {
     const response = await fetch(RELEASE_METADATA, { signal: AbortSignal.timeout(7000), headers: { accept: 'application/json' } });
     if (!response.ok) return;
-    const release = await response.json();
-    if (!release.version || compareVersions(release.version, app.getVersion()) <= 0 || !release.windows?.url) return;
-
-    const download = await fetch(release.windows.url, { signal: AbortSignal.timeout(120000) });
-    if (!download.ok || !download.body) throw new Error('Could not download the installer.');
-    const installer = path.join(os.tmpdir(), `Veyra${release.version}.exe`);
-    await pipeline(Readable.fromWeb(download.body), fs.createWriteStream(installer));
-    const child = spawn(installer, ['/S'], { detached: true, stdio: 'ignore' });
-    child.on('error', () => { try { fs.unlinkSync(installer); } catch {} });
-    child.unref();
-    updateInstalling = true;
-    app.quit();
-  } catch (error) {
-    console.warn('Veyra update check failed; starting current version:', error.message);
-    await dialog.showMessageBox({ type: 'warning', title: 'Veyra update failed', message: 'Could not install the latest Veyra update. Starting the current version.', detail: error.message });
+    release = await response.json();
+  } catch {
+    return;
   }
+  if (!release?.version || !release.windows?.url || compareVersions(release.version, app.getVersion()) <= 0) return;
+
+  pendingRelease = release;
+  const state = {
+    stage: 'available',
+    version: release.version,
+    currentVersion: app.getVersion(),
+    notes: release.notes || release.name || null,
+  };
+  ensureUpdateWindow();
+  updateWindow?.webContents.once('did-finish-load', () => sendUpdateState(state));
+  sendUpdateState(state);
 }
+
+function installPendingUpdate() {
+  if (!pendingInstallerPath || !fs.existsSync(pendingInstallerPath)) {
+    sendUpdateState({ stage: 'error', message: 'The downloaded update is no longer available. Please check for updates again.' });
+    return;
+  }
+  updateInstalling = true;
+  const child = spawn(pendingInstallerPath, ['/S'], { detached: true, stdio: 'ignore' });
+  child.on('error', () => {
+    updateInstalling = false;
+    sendUpdateState({ stage: 'error', message: 'Could not start the installer. Please download the update manually.' });
+  });
+  child.unref();
+  app.quit();
+}
+
+ipcMain.on('veyra:update-action', (_event, action) => {
+  if (action === 'later') {
+    if (updateWindow && !updateWindow.isDestroyed()) updateWindow.close();
+  } else if ((action === 'download' || action === 'retry') && pendingRelease) {
+    void runDownload(pendingRelease);
+  } else if (action === 'install') {
+    installPendingUpdate();
+  }
+});
 
 function createWindow() {
   const window = new BrowserWindow({
@@ -149,9 +250,10 @@ function createWindow() {
 app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) return;
   if (!app.isDefaultProtocolClient('veyra')) app.setAsDefaultProtocolClient('veyra');
-  await updateBeforeLaunch();
-  if (updateInstalling) return;
   createWindow();
+  // Update checks run in the background so a slow or unreachable release
+  // feed can never block or break app startup.
+  void checkForUpdates();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

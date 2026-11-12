@@ -1,6 +1,17 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { Browser } from '@capacitor/browser';
+import { toast } from '@/hooks/use-toast';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 
 const RELEASE_URL = 'https://github.com/ShanLim655/Veyra/releases/latest/download/latest.json';
 const INSTALLED_VERSION = import.meta.env.VITE_APP_VERSION || '0.0.0';
@@ -13,7 +24,19 @@ function compareVersions(left: string, right: string) {
   return 0;
 }
 
+type ReleaseInfo = {
+  version?: string;
+  tag?: string;
+  notes?: string;
+  name?: string;
+  android?: { file?: string; url?: string };
+};
+
 export function AndroidUpdateCheck() {
+  const [release, setRelease] = useState<ReleaseInfo | null>(null);
+  const [open, setOpen] = useState(false);
+  const [opening, setOpening] = useState(false);
+
   useEffect(() => {
     if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== 'android') return;
     let cancelled = false;
@@ -21,16 +44,62 @@ export function AndroidUpdateCheck() {
       try {
         const response = await fetch(RELEASE_URL, { cache: 'no-store' });
         if (!response.ok) return;
-        const release = await response.json() as { version?: string; android?: { url?: string } };
-        if (cancelled || !release.version || !release.android?.url || compareVersions(release.version, INSTALLED_VERSION) <= 0) return;
-        if (!window.confirm(`Veyra ${release.version} is available. Update now?\n\nChoose Cancel to be reminded the next time you open Veyra.`)) return;
-        await Browser.open({ url: release.android.url });
+        const info = await response.json() as ReleaseInfo;
+        if (cancelled || !info.version || !info.android?.url || compareVersions(info.version, INSTALLED_VERSION) <= 0) return;
+        setRelease(info);
+        setOpen(true);
       } catch (error) {
         console.warn('Could not check for Android updates:', error);
+        toast({
+          title: 'Update check failed',
+          description: 'Veyra could not reach the release server. You are still running the current version.',
+          variant: 'destructive',
+        });
       }
     })();
     return () => { cancelled = true; };
   }, []);
 
-  return null;
+  const download = async () => {
+    if (!release?.android?.url || opening) return;
+    setOpening(true);
+    try {
+      await Browser.open({ url: release.android.url });
+    } catch (error) {
+      console.warn('Could not open the Android update download:', error);
+      toast({
+        title: 'Download failed',
+        description: 'Could not open the update download. Please check your connection and try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setOpening(false);
+    }
+  };
+
+  return (
+    <AlertDialog open={open} onOpenChange={setOpen}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Veyra {release?.version} is available</AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="space-y-2">
+              <p>You are running Veyra {INSTALLED_VERSION}. Download the new APK to update.</p>
+              {release?.notes || release?.name ? (
+                <p className="text-xs text-muted-foreground whitespace-pre-wrap">
+                  {release.notes || release.name}
+                </p>
+              ) : null}
+            </div>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={opening}>Later</AlertDialogCancel>
+          <AlertDialogAction onClick={(event) => { event.preventDefault(); void download(); }} disabled={opening}>
+            {opening ? 'Opening…' : 'Download update'}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
 }
