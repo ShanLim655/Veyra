@@ -65,7 +65,7 @@ See [Redis operations and configuration](docs/redis.md) for connection setup, fa
 
 Set `MESSAGE_ENCRYPTION_KEY` (base64, 32 bytes) in the API runtime environment to encrypt message content before it is stored in MariaDB; `MESSAGE_ENCRYPTION_KEY_PREVIOUS` accepts comma-separated older keys for rotation. Without it, the API warns at startup and stores content unencrypted, and pre-existing plaintext messages always remain readable. Full details, including what is and is not encrypted, are in [docs/message-encryption.md](docs/message-encryption.md).
 
-Altare Queues integration is off unless `ALTARE_QUEUES_ENABLED=true` and `ALTARE_QUEUES_URL` point at a queue service. When disabled, nothing connects to a queue and notification delivery runs inline. See [docs/queues.md](docs/queues.md) for the worker contract.
+Altare Queues integration is off unless `ALTARE_QUEUE_URL` (and `ALTARE_QUEUE_TOKEN`) point at a queue service. When disabled, nothing connects to a queue and notification delivery runs inline; `npm run queue:worker` runs the reference worker that delivers queued notifications. See [docs/queues.md](docs/queues.md) for the worker contract.
 
 ### Sessions and rate limiting
 
