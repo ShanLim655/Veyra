@@ -1157,7 +1157,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     const senderIds = [...new Set((data || []).map((m: any) => m.sender_id).filter((id: string | null) => id && id !== user?.id))] as string[];
     const replyToIds = [...new Set((data || []).map((m: any) => m.reply_to_id).filter(Boolean))] as string[];
 
-    let messagesWithSenders: Message[];
+    let messagesWithSenders: Message[] = [];
     try {
     // These reads are independent; issue them together instead of making each
     // chat load wait through multiple database round trips in sequence.
@@ -1199,7 +1199,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       return [m.id, { ...m, sender }];
     }));
 
-    const messagesWithSenders = await Promise.all((data || []).map(async (msg: any) => {
+    messagesWithSenders = await Promise.all((data || []).map(async (msg: any) => {
       const sender = msg.sender_id === user?.id ? ownSenderProfile : msg.sender_id ? profilesMap.get(msg.sender_id) : undefined;
       const repliedMessage = msg.reply_to_id ? repliedMessagesMap.get(msg.reply_to_id) : undefined;
       const signedImageUrl = await signMessageMedia(msg.image_url);
