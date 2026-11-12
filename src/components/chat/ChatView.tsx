@@ -1223,12 +1223,15 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     }));
     messagesWithSenders.reverse(); // ascending order
     } catch (enrichError) {
-      // A failure while enriching (profiles/reactions/media signing) must not
-      // wedge pagination: reset the load-more flags and keep existing messages.
+      // Enrichment (profiles/reactions/media signing) is best-effort: fall
+      // back to the raw fetched rows so a failure in an optimization can
+      // never keep message history from rendering.
       console.error("Error enriching messages:", enrichError);
-      setLoadingMore(false);
-      loadingMoreRef.current = false;
-      return;
+      messagesWithSenders = ((data || []) as any[]).slice().reverse().map((msg) => ({
+        ...msg,
+        reactions: [],
+        _status: "sent" as const,
+      }));
     }
 
     if (loadMore) {
