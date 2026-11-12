@@ -160,6 +160,7 @@ The cleanup marks chat attachments older than 14 days as expired and exempts adm
 | `npm run build` | Build the frontend |
 | `npm start` | Serve the production frontend and API |
 | `npm run db:migrate` | Initialize the MariaDB schema |
+| `npm run db:encrypt:messages` | Encrypt existing plaintext message rows (`-- --dry-run` to preview) |
 | `npm run db:import:legacy` | Import Supabase Postgres app tables into MariaDB |
 | `npm run lint` | Run ESLint |
 | `npm test` | Run server unit tests |

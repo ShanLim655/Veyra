@@ -13,6 +13,7 @@
     "dev": "concurrently -k -n vite,api \"vite --host 0.0.0.0\" \"node --watch server/index.mjs\"",
     "start": "node server/index.mjs",
     "db:migrate": "node server/migrate.mjs",
+    "db:encrypt:messages": "node server/encrypt-messages.mjs",
     "db:import:legacy": "node server/import-postgres.mjs",
     "test": "node --test server/encryption.test.mjs server/redis.test.mjs",
     "build": "vite build",

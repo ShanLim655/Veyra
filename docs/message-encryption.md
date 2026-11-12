@@ -50,6 +50,26 @@ stores new message content as plaintext. Values without the `veyra:v1:`
 prefix are always treated as legacy plaintext, so messages written before
 encryption was enabled remain readable without a migration.
 
+## Migrating existing plaintext rows
+
+Encryption is optional at runtime: rows written before `MESSAGE_ENCRYPTION_KEY`
+was set stay plaintext and remain readable. To encrypt historical rows:
+
+```bash
+# Preview how many rows would be encrypted (no writes):
+npm run db:encrypt:messages -- --dry-run
+
+# Encrypt all plaintext rows:
+npm run db:encrypt:messages
+```
+
+The script requires `MESSAGE_ENCRYPTION_KEY` in the environment, processes
+rows in batches, and is idempotent — values already carrying the `veyra:v1:`
+prefix are skipped, so it is safe to interrupt and re-run. Each update is
+guarded by the row's previous plaintext value, so a message edited while the
+migration runs is skipped rather than overwritten; re-run to pick it up.
+Batch size can be tuned with `ENCRYPT_BATCH_SIZE` (default 500, max 5000).
+
 ## Rotation
 
 1. Generate a new key and set it as `MESSAGE_ENCRYPTION_KEY`.
