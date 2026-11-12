@@ -29,7 +29,7 @@ try {
   } else {
     const isEmail = identifier.includes('@');
     const [rows] = isEmail
-      ? await pool.execute('SELECT id, username FROM profiles p JOIN auth_users a ON a.id = p.id WHERE a.email = ? LIMIT 1', [identifier.trim().toLowerCase()])
+      ? await pool.execute('SELECT p.id, p.username FROM profiles p JOIN auth_users a ON a.id = p.id WHERE a.email = ? LIMIT 1', [identifier.trim().toLowerCase()])
       : await pool.execute('SELECT id, username FROM profiles WHERE username = ? LIMIT 1', [identifier.trim()]);
 
     if (!rows.length) {
