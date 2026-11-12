@@ -14,6 +14,7 @@
     "start": "node server/index.mjs",
     "db:migrate": "node server/migrate.mjs",
     "db:encrypt:messages": "node server/encrypt-messages.mjs",
+    "db:grant-role": "node server/grant-role.mjs",
     "queue:worker": "node scripts/altare-queue-worker.mjs",
     "db:import:legacy": "node server/import-postgres.mjs",
     "test": "node --test server/encryption.test.mjs server/redis.test.mjs",

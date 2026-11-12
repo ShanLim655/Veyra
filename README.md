@@ -25,7 +25,7 @@ MariaDB, Google OAuth, and Sequenzy credentials stay on the server. The browser 
 - Replies, edits, emoji reactions, markdown, mentions, files, images, video, music cards, and voice messages.
 - Single-choice and multiple-choice polls.
 - Profiles, custom status, privacy, notifications, and theme settings.
-- Admin tools for member management, analytics, roles, moderation, and logs.
+- Admin tools for member management, analytics, roles, moderation, and logs. Roles (`user`/`admin`/`super_admin`) live in `user_roles` and are enforced server-side; see [docs/admin.md](docs/admin.md) for the permission model and how to grant the first admin.
 - ntfy push notifications and cleanup of old chat attachments.
 
 ## Setup
@@ -161,6 +161,7 @@ The cleanup marks chat attachments older than 14 days as expired and exempts adm
 | `npm start` | Serve the production frontend and API |
 | `npm run db:migrate` | Initialize the MariaDB schema |
 | `npm run db:encrypt:messages` | Encrypt existing plaintext message rows (`-- --dry-run` to preview) |
+| `npm run db:grant-role` | Grant/revoke a user role: `npm run db:grant-role -- <username-or-email> <user\|admin\|super_admin\|none>` |
 | `npm run db:import:legacy` | Import Supabase Postgres app tables into MariaDB |
 | `npm run lint` | Run ESLint |
 | `npm test` | Run server unit tests |
