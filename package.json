@@ -130,7 +130,7 @@
       "package.json"
     ],
     "win": {
-      "icon": "public/favicon.ico",
+      "icon": "resources/veyra-icon.ico",
       "target": [
         {
           "target": "nsis",

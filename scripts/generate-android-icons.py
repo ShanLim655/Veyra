@@ -1,6 +1,10 @@
-"""Regenerate Android launcher icons from public/favicon.ico.
+"""Regenerate app icons from public/favicon.ico.
 
 Usage: python scripts/generate-android-icons.py
+
+Writes Android launcher PNGs into resources/android-icons/ and a multi-size
+Windows .ico into resources/veyra-icon.ico (electron-builder requires icons
+of at least 256x256, which favicon.ico does not provide).
 """
 from pathlib import Path
 
@@ -9,6 +13,7 @@ from PIL import Image, ImageDraw
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "public" / "favicon.ico"
 RES = ROOT / "android" / "app" / "src" / "main" / "res"
+ICO_SIZES = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
 
 DENSITIES = {
     "mdpi": 1.0,
@@ -62,6 +67,15 @@ def main() -> None:
         canvas.paste(fg, (offset, offset), fg)
         canvas.save(res_dir / "ic_launcher_foreground.png")
         print(f"{density}: launcher={launcher_px}px foreground={fg_px}px")
+
+    # Multi-size .ico for electron-builder (it rejects icons below 256px).
+    src_256 = src.resize((256, 256), Image.LANCZOS)
+    src_256.save(
+        ROOT / "resources" / "veyra-icon.ico",
+        format="ICO",
+        sizes=ICO_SIZES,
+    )
+    print("resources/veyra-icon.ico written")
 
 
 if __name__ == "__main__":
