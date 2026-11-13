@@ -56,6 +56,7 @@ import { signMessageMedia, encodeFile, decodeFile, encodeMusic, decodeMusic, col
 import { compressImageForUpload } from "@/lib/imageCompress";
 import { getCachedMessages, setCachedMessages } from "@/lib/chatCache";
 import { parseServerDate, serverDateMs } from "@/lib/dates";
+import { mergeMessagePage, prependOlderMessages } from "@/lib/messageMerge";
 import { exceedsMaxUploadSize, MAX_UPLOAD_SIZE_LABEL } from "@/lib/uploadLimits";
 import { MessageFileCard } from "@/components/chat/MessageFileCard";
 import { ChatImage } from "@/components/chat/ChatImage";
@@ -280,6 +281,11 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   // capture the epoch at start and bail before touching state if it moved on,
   // so a slow DM-A request can never merge into DM-B's messages or cache.
   const conversationEpochRef = useRef(0);
+  // Tracks the conversation that async work (fetches, realtime callbacks,
+  // debounced writes) currently belongs to. Refuses stale writes after a
+  // conversation switch. Synced by the effect declared just above the
+  // fetch/subscription effect so it is always current before fetches start.
+  const activeConversationRef = useRef<string | null>(conversationId);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [isTabVisible, setIsTabVisible] = useState(!document.hidden);
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
@@ -384,6 +390,9 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   const fetchPinnedMessages = useCallback(async () => {
     if (!supportsPinning) return;
     if (isDM && !conversationIdProp) return;
+    // The queries below are async — remember which conversation this fetch
+    // belongs to so a switch cannot apply its results to the new one.
+    const targetConversation = activeConversationRef.current;
 
     let q: any = (supabase as any)
       .from(messagesTable)
@@ -410,6 +419,9 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       sender: msg.sender_id === user?.id ? ownSenderProfile : msg.sender_id ? profilesMap.get(msg.sender_id) : undefined,
     }));
 
+    // A conversation switch must not let this conversation's pinned messages
+    // leak into the new one's header.
+    if (activeConversationRef.current !== targetConversation) return;
     setPinnedMessages(pinnedWithSenders as Message[]);
   }, [conversationIdProp, isDM, supportsPinning, messagesTable]);
 
@@ -603,6 +615,16 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     messagesRef.current = messages;
   }, [messages]);
 
+  // Sync the active-conversation marker and bump the fetch epoch BEFORE the
+  // fetch/subscription effect below runs. fetchMessages captures the epoch
+  // synchronously when it is invoked, so this ordering is what lets the new
+  // conversation's fetch start with a fresh epoch while requests started
+  // under the previous conversation observe the bump and bail via isStale().
+  useEffect(() => {
+    activeConversationRef.current = conversationId;
+    conversationEpochRef.current += 1;
+  }, [conversationId]);
+
   useEffect(() => {
     if (conversationId && isActive) {
       fetchMessages();
@@ -740,9 +762,14 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
               const rawImageUrl = newMsg.image_url || null;
               // Signing is best-effort — a failure must not drop the live message.
               newMsg.image_url = await signMessageMedia(newMsg.image_url).catch(() => newMsg.image_url);
+              // The sender/reply/signing lookups above are async — the user may
+              // have switched conversations meanwhile. Never merge this message
+              // into a different conversation's state.
+              if (activeConversationRef.current !== conversationId) return;
               reconcileLiveMessage({ ...newMsg, _status: "sent" }, rawImageUrl);
               // Scroll to bottom only if user is already near the bottom
               setTimeout(() => {
+                if (activeConversationRef.current !== conversationId) return;
                 const v = scrollAreaRef.current?.querySelector(
                   "[data-radix-scroll-area-viewport]",
                 ) as HTMLElement | null;
@@ -801,6 +828,10 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
             if (change.refresh) {
               const messageIds = messagesRef.current.map((message) => message.id);
               void fetchReactions(messageIds).then((reactionMap) => {
+                // The fetch is async — bail if the conversation changed so a
+                // stale reaction map cannot wipe the new conversation's
+                // reactions (every id would miss and reset to []).
+                if (activeConversationRef.current !== conversationId) return;
                 setMessages((previous) => previous.map((message) => ({
                   ...message,
                   reactions: reactionMap[message.id] || [],
@@ -930,15 +961,11 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   // Track the currently-loaded conversation so async writes (debounced cache
   // persistence, in-flight fetches) can refuse to apply when the conversation
   // has switched underneath them. Defense-in-depth against cross-DM bleed.
-  const activeConversationRef = useRef<string | null>(conversationId);
-  useEffect(() => {
-    activeConversationRef.current = conversationId;
-  }, [conversationId]);
-
+  // The ref itself is declared near conversationEpochRef and synced by the
+  // effect placed before the fetch/subscription effect above.
   useEffect(() => {
     // Reset state when conversation changes. Hydrate from cache synchronously
     // so the UI never flashes empty while the network fetch is in flight.
-    conversationEpochRef.current += 1;
     const cached = getCachedMessages<Message>(conversationId);
     setMessages(cached && cached.length > 0 ? cached : []);
     pendingOutgoingMessagesRef.current.clear();
@@ -951,6 +978,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     initialScrollSettledRef.current = false;
     userScrolledRef.current = false;
     loadingMoreRef.current = false;
+    setLoadingMore(false);
     const presetTimer = setTimeout(() => setShowQuickPresets(true), 1000);
     // Independent settle guarantee — ensures scroll-up pagination becomes
     // available even if the per-message scroll effect keeps cancelling its
@@ -1050,6 +1078,9 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
 
   const fetchOtherUser = async () => {
     if (!conversationId || !user) return;
+    // Every await below can outlive the conversation it was started for —
+    // refuse to apply header/member state once the user has switched.
+    const isCurrent = () => activeConversationRef.current === conversationId;
 
     // Look up whether this conversation is a group so we can branch the
     // header / mention candidates / read-receipt behavior.
@@ -1082,6 +1113,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
         .filter(Boolean) as Profile[];
       const myRole = (rows ?? []).find((r: any) => r.user_id === user.id)?.role ?? null;
 
+      if (!isCurrent()) return;
       setIsGroupConv(true);
       setGroupMembers(orderedMembers);
       setGroupInfo({ name: conv?.name ?? null, my_role: myRole as any });
@@ -1100,6 +1132,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       return;
     }
 
+    if (!isCurrent()) return;
     setIsGroupConv(false);
     setGroupMembers([]);
     setGroupInfo({ name: null, my_role: null });
@@ -1116,6 +1149,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
         .select("*")
         .eq("id", members[0].user_id)
         .single();
+      if (!isCurrent()) return;
       setOtherUser(profile);
       if (profile) {
         setDmMembers([
@@ -1297,9 +1331,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
 
       setMessages((prev) => {
         if (isStale()) return prev;
-        const existingIds = new Set(prev.map((m) => m.id));
-        const fresh = messagesWithSenders.filter((m) => !existingIds.has(m.id));
-        return [...fresh, ...prev];
+        return prependOlderMessages(prev, messagesWithSenders);
       });
 
       // Restore scroll position after new messages are added
@@ -1319,12 +1351,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       userScrolledRef.current = false;
       setMessages((prev) => {
         if (isStale()) return prev;
-        const merged = new Map<string, Message>();
-        for (const m of prev) merged.set(m.id, m);
-        for (const m of messagesWithSenders) merged.set(m.id, m);
-        return Array.from(merged.values()).sort(
-          (a, b) => serverDateMs(a.created_at) - serverDateMs(b.created_at),
-        );
+        return mergeMessagePage(prev, messagesWithSenders);
       });
     }
   };
@@ -1483,13 +1510,20 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       _status: "sending",
     };
 
-    pendingOutgoingMessagesRef.current.set(tempId, {
-      content: contentToSend,
-      reply_to_id: replyTarget?.id || null,
-      image_url: imageUrlJson || null,
-      created_at: Date.now(),
-    });
-    setMessages((prev) => [...prev, optimisticMessage]);
+    // Media upload and signing above are async — the user may have switched
+    // conversations meanwhile. The DB insert below must still run (it targets
+    // this conversation via the closure), but the optimistic message and its
+    // reconciliation marker belong to this conversation's state only.
+    const stillActive = activeConversationRef.current === conversationId;
+    if (stillActive) {
+      pendingOutgoingMessagesRef.current.set(tempId, {
+        content: contentToSend,
+        reply_to_id: replyTarget?.id || null,
+        image_url: imageUrlJson || null,
+        created_at: Date.now(),
+      });
+      setMessages((prev) => [...prev, optimisticMessage]);
+    }
 
     const insertPayload: any = {
       sender_id: user.id,
@@ -2189,6 +2223,9 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                       longPressFiredRef.current = true;
                       try { (navigator as any).vibrate?.(15); } catch { /* vibration unavailable */ }
                       try { window.getSelection()?.removeAllRanges(); } catch { /* selection API unavailable */ }
+                      // The press may have started in a conversation the user
+                      // has since left — don't open the action sheet for it.
+                      if (activeConversationRef.current !== conversationId) return;
                       setMobileActionMessage(message);
                     }, 400);
                   }}
