@@ -76,6 +76,7 @@ import { GroupAvatar } from "@/components/chat/GroupAvatar";
 import { GroupSettingsDialog } from "@/components/chat/GroupSettingsDialog";
 import { handleMessageRealtimePayload, handleReactionRealtimePayload } from "./messageRealtime";
 import { fetchConversationMessages } from "./messageFetch";
+import { reconcileLiveMessage as reconcileLiveMessageState } from "./reconcileMessage";
 
 
 
@@ -539,65 +540,12 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   }, [messagesTable, showReceipts, user?.id]);
 
   const reconcileLiveMessage = useCallback((incoming: Message, matchImageUrl = incoming.image_url || null) => {
-    const now = Date.now();
-    let optimisticId: string | undefined;
-    if (incoming.sender_id === user?.id && !messagesRef.current.some((message) => message.id === incoming.id)) {
-      for (const [id, pending] of pendingOutgoingMessagesRef.current) {
-        if (now - pending.created_at > 120_000) {
-          pendingOutgoingMessagesRef.current.delete(id);
-          continue;
-        }
-        if (pending.content === incoming.content
-          && pending.reply_to_id === (incoming.reply_to_id || null)
-          && pending.image_url === matchImageUrl) {
-          optimisticId = id;
-          pendingOutgoingMessagesRef.current.delete(id);
-          break;
-        }
-      }
-    }
-
-    setMessages((previous) => {
-      const existingIndex = previous.findIndex((message) => message.id === incoming.id);
-      if (existingIndex >= 0) {
-        const existing = previous[existingIndex];
-        const next = previous.slice();
-        next[existingIndex] = {
-          ...incoming,
-          ...existing,
-          sender: existing.sender || incoming.sender,
-          replied_message: existing.replied_message || incoming.replied_message,
-          image_url: existing.image_url || incoming.image_url,
-          reactions: existing.reactions?.length ? existing.reactions : incoming.reactions || [],
-          _status: existing._status === 'sending' ? 'sent' : existing._status || 'sent',
-        };
-        return next;
-      }
-
-      const optimisticIndex = optimisticId
-        ? previous.findIndex((message) => message.id === optimisticId)
-        : -1;
-      if (optimisticIndex >= 0) {
-        const optimistic = previous[optimisticIndex];
-        const next = previous.slice();
-        next[optimisticIndex] = {
-          ...optimistic,
-          ...incoming,
-          image_url: optimistic.image_url || incoming.image_url,
-          reactions: optimistic.reactions || incoming.reactions || [],
-          replied_message: optimistic.replied_message || incoming.replied_message,
-          _status: 'sent',
-        };
-        return next.sort((left, right) =>
-          serverDateMs(left.created_at) - serverDateMs(right.created_at));
-      }
-
-      if (!previous.length || serverDateMs(previous[previous.length - 1].created_at) <= serverDateMs(incoming.created_at)) {
-        return [...previous, incoming];
-      }
-      const next = [...previous, incoming];
-      return next.sort((left, right) =>
-        serverDateMs(left.created_at) - serverDateMs(right.created_at));
+    reconcileLiveMessageState(incoming, matchImageUrl, {
+      userId: user?.id,
+      activeConversationRef,
+      messagesRef,
+      pendingOutgoingMessagesRef,
+      setMessages,
     });
   }, [user?.id]);
 

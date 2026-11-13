@@ -85,7 +85,12 @@ export async function handleMessageRealtimePayload(
   const change = payload as MariaDbRefreshPayload;
   if (change.refresh) {
     if (change.eventType === "DELETE" && change.keys?.id) {
-      setMessages((previous) => previous.filter((message) => message.id !== change.keys!.id));
+      setMessages((previous) => {
+        // React may run this updater after a conversation switch — the
+        // entry isCurrent() check alone cannot cover deferred execution.
+        if (!isCurrent()) return previous;
+        return previous.filter((message) => message.id !== change.keys!.id);
+      });
       return;
     }
 
@@ -123,14 +128,17 @@ export async function handleMessageRealtimePayload(
           repliedMessage = { ...replyResult.data, sender: replySenderResult.data || undefined };
         }
         if (!isCurrent()) return;
-        setMessages((previous) => previous.map((message) => message.id === received.id
-          ? {
-            ...message,
-            image_url: signedImageUrl,
-            sender: senderResult.data || received.sender,
-            replied_message: repliedMessage,
-          }
-          : message));
+        setMessages((previous) => {
+          if (!isCurrent()) return previous;
+          return previous.map((message) => message.id === received.id
+            ? {
+              ...message,
+              image_url: signedImageUrl,
+              sender: senderResult.data || received.sender,
+              replied_message: repliedMessage,
+            }
+            : message);
+        });
       }).catch((error) => console.warn("Could not enrich live message:", error));
       const viewport = scrollViewport(scrollAreaRef);
       if (viewport && viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 250) {
@@ -149,23 +157,25 @@ export async function handleMessageRealtimePayload(
       && columns.every((column) => column === "read_at" || column === "delivered_at");
     if (receiptOnly) {
       if (!receiptTimerRef.current) {
-        receiptTimerRef.current = setTimeout(() => {
-          receiptTimerRef.current = null;
-          // The timer can outlive its conversation (scheduled just before a
-          // switch, fired after) — never refresh receipts for a stale one.
+        const timer = setTimeout(() => {
+          // Only clear the ref if this callback still owns it — a newer
+          // conversation's timer may have replaced it meanwhile.
+          if (receiptTimerRef.current === timer) receiptTimerRef.current = null;
           if (!isCurrent()) return;
           refreshReceiptStatuses();
         }, 100);
+        receiptTimerRef.current = timer;
       }
       return;
     }
 
     if (!refreshTimerRef.current) {
-      refreshTimerRef.current = setTimeout(() => {
-        refreshTimerRef.current = null;
+      const timer = setTimeout(() => {
+        if (refreshTimerRef.current === timer) refreshTimerRef.current = null;
         if (!isCurrent()) return;
         refetch();
       }, 60);
+      refreshTimerRef.current = timer;
     }
     return;
   }
@@ -232,8 +242,9 @@ export async function handleMessageRealtimePayload(
     }
   } else if (event === "UPDATE") {
     const updatedMsg = (payload as { new: Message }).new;
-    setMessages((prev) =>
-      prev.map((m) => {
+    setMessages((prev) => {
+      if (!isCurrent()) return prev;
+      return prev.map((m) => {
         if (m.id === updatedMsg.id) {
           const newStatus = !showReceipts
             ? m._status
@@ -250,11 +261,14 @@ export async function handleMessageRealtimePayload(
           };
         }
         return m;
-      })
-    );
+      });
+    });
   } else if (event === "DELETE") {
     const deletedMsg = (payload as { old: Message }).old;
-    setMessages((prev) => prev.filter((m) => m.id !== deletedMsg.id));
+    setMessages((prev) => {
+      if (!isCurrent()) return prev;
+      return prev.filter((m) => m.id !== deletedMsg.id);
+    });
   }
 }
 
@@ -276,10 +290,13 @@ export function handleReactionRealtimePayload(
       // stale reaction map cannot wipe the new conversation's
       // reactions (every id would miss and reset to []).
       if (!isCurrent()) return;
-      setMessages((previous) => previous.map((message) => ({
-        ...message,
-        reactions: reactionMap[message.id] || [],
-      })));
+      setMessages((previous) => {
+        if (!isCurrent()) return previous;
+        return previous.map((message) => ({
+          ...message,
+          reactions: reactionMap[message.id] || [],
+        }));
+      });
     });
     return;
   }
@@ -287,27 +304,29 @@ export function handleReactionRealtimePayload(
   const event = (payload as { eventType?: string }).eventType;
   if (event === "INSERT") {
     const newReaction = (payload as { new: Reaction }).new;
-    setMessages((prev) =>
-      prev.map((m) =>
+    setMessages((prev) => {
+      if (!isCurrent()) return prev;
+      return prev.map((m) =>
         m.id === newReaction.message_id
           ? {
             ...m,
             reactions: [...(m.reactions || []).filter((r) => r.id !== newReaction.id), newReaction],
           }
           : m
-      )
-    );
+      );
+    });
   } else if (event === "DELETE") {
     const deletedReaction = (payload as { old: Reaction }).old;
-    setMessages((prev) =>
-      prev.map((m) =>
+    setMessages((prev) => {
+      if (!isCurrent()) return prev;
+      return prev.map((m) =>
         m.id === deletedReaction.message_id
           ? {
             ...m,
             reactions: (m.reactions || []).filter((r) => r.id !== deletedReaction.id),
           }
           : m
-      )
-    );
+      );
+    });
   }
 }

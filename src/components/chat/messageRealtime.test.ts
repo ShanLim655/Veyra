@@ -68,9 +68,18 @@ interface Harness {
   };
   setCurrent: (v: boolean) => void;
   isCurrent: () => boolean;
+  // Applies queued functional updaters the way React would when it gets to
+  // them — possibly after the conversation changed. Only populated when the
+  // harness is created with { deferSetMessages: true }.
+  applyPending: () => void;
+  pendingCount: () => number;
 }
 
-function makeHarness(overrides: Partial<MessageRealtimeDeps> = {}, initial: Message[] = []): Harness {
+function makeHarness(
+  overrides: Partial<MessageRealtimeDeps> = {},
+  initial: Message[] = [],
+  options: { deferSetMessages?: boolean } = {},
+): Harness {
   let current = true;
   const state = { messages: [...initial] };
   const calls = { reconcile: [] as Message[], setMessages: 0, refetch: 0, scroll: [] as string[], receiptRefresh: 0 };
@@ -79,8 +88,13 @@ function makeHarness(overrides: Partial<MessageRealtimeDeps> = {}, initial: Mess
     refresh: { current: null as ReturnType<typeof setTimeout> | null },
     receipt: { current: null as ReturnType<typeof setTimeout> | null },
   };
+  const pendingUpdaters: Array<Parameters<MessageRealtimeDeps["setMessages"]>[0]> = [];
   const setMessages: MessageRealtimeDeps["setMessages"] = (updater) => {
     calls.setMessages += 1;
+    if (options.deferSetMessages) {
+      pendingUpdaters.push(updater);
+      return;
+    }
     state.messages = typeof updater === "function" ? updater(state.messages) : updater;
     messagesRef.current = state.messages;
   };
@@ -118,6 +132,13 @@ function makeHarness(overrides: Partial<MessageRealtimeDeps> = {}, initial: Mess
     calls,
     setCurrent: (v) => { current = v; },
     isCurrent: () => current,
+    applyPending: () => {
+      for (const updater of pendingUpdaters.splice(0)) {
+        state.messages = typeof updater === "function" ? updater(state.messages) : updater;
+      }
+      messagesRef.current = state.messages;
+    },
+    pendingCount: () => pendingUpdaters.length,
   };
 }
 
@@ -279,6 +300,35 @@ describe("deferred refresh timers — conversation guard", () => {
       vi.useRealTimers();
     }
   });
+
+  it("does not clear a newer conversation's timer reference when a stale callback fires", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = makeHarness({}, [makeMessage("m1")]);
+
+      await handleMessageRealtimePayload(refreshUpdate("m1", ["content"]), h.deps);
+      await handleMessageRealtimePayload(refreshUpdate("m1", ["read_at", "delivered_at"]), h.deps);
+      expect(h.deps.refreshTimerRef.current).not.toBeNull();
+      expect(h.deps.receiptTimerRef.current).not.toBeNull();
+
+      h.setCurrent(false);
+      // The new conversation has since stored its own pending timers in the
+      // shared refs — the stale callbacks must not null them out.
+      const newerRefresh = setTimeout(() => {}, 60_000);
+      const newerReceipt = setTimeout(() => {}, 60_000);
+      h.deps.refreshTimerRef.current = newerRefresh;
+      h.deps.receiptTimerRef.current = newerReceipt;
+
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(h.calls.refetch).toBe(0);
+      expect(h.calls.receiptRefresh).toBe(0);
+      expect(h.deps.refreshTimerRef.current).toBe(newerRefresh);
+      expect(h.deps.receiptTimerRef.current).toBe(newerReceipt);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("handleMessageRealtimePayload — standard INSERT lifecycle", () => {
@@ -436,16 +486,215 @@ describe("handleMessageRealtimePayload — standard INSERT lifecycle", () => {
   });
 });
 
-describe("handleReactionRealtimePayload — conversation guard", () => {
-  function makeReactionHarness(initial: Message[] = []) {
+describe("deferred functional updaters — conversation guard", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedSign.mockImplementation(async (value) => (value ? `SIGNED:${value}` : value));
+  });
+
+  // React may execute a functional setMessages updater after the payload
+  // handler already returned — and after the user switched conversations.
+  // These tests queue the updater (deferSetMessages), switch, then flush.
+
+  it("drops a queued refresh DELETE once the conversation switches", async () => {
+    const h = makeHarness({}, [makeMessage("m1"), makeMessage("m2")], { deferSetMessages: true });
+
+    await handleMessageRealtimePayload(refreshDelete("m1"), h.deps);
+    expect(h.pendingCount()).toBe(1);
+    expect(h.messages().map((m) => m.id)).toEqual(["m1", "m2"]);
+
+    h.setCurrent(false);
+    h.applyPending();
+
+    expect(h.messages().map((m) => m.id)).toEqual(["m1", "m2"]);
+  });
+
+  it("still applies a queued refresh DELETE for the active conversation", async () => {
+    const h = makeHarness({}, [makeMessage("m1"), makeMessage("m2")], { deferSetMessages: true });
+
+    await handleMessageRealtimePayload(refreshDelete("m1"), h.deps);
+    h.applyPending();
+
+    expect(h.messages().map((m) => m.id)).toEqual(["m2"]);
+  });
+
+  it("drops queued refresh-INSERT enrichment after a switch", async () => {
+    const supabase = makeSupabase({
+      profiles: [{ username: "alice", display_name: "Alice", avatar_url: null }],
+    });
+    const h = makeHarness({ supabase: supabase as MessageRealtimeDeps["supabase"] }, [], { deferSetMessages: true });
+
+    await handleMessageRealtimePayload(
+      refreshInsert({ id: "m9", sender_id: "alice-id", content: "hi", image_url: "raw" }),
+      h.deps,
+    );
+    await flush();
+    // Enrichment finished while still current, so the updater was queued.
+    expect(h.pendingCount()).toBe(1);
+
+    h.setCurrent(false);
+    h.applyPending();
+
+    const merged = h.messages().find((m) => m.id === "m9");
+    expect(merged?.image_url).toBe("raw");
+    expect(merged?.sender?.username).not.toBe("alice");
+  });
+
+  it("applies queued refresh-INSERT enrichment for the active conversation", async () => {
+    const supabase = makeSupabase({
+      profiles: [{ username: "alice", display_name: "Alice", avatar_url: null }],
+    });
+    const h = makeHarness({ supabase: supabase as MessageRealtimeDeps["supabase"] }, [], { deferSetMessages: true });
+
+    await handleMessageRealtimePayload(
+      refreshInsert({ id: "m9", sender_id: "alice-id", content: "hi", image_url: "raw" }),
+      h.deps,
+    );
+    await flush();
+    h.applyPending();
+
+    const merged = h.messages().find((m) => m.id === "m9");
+    expect(merged?.image_url).toBe("SIGNED:raw");
+    expect(merged?.sender?.username).toBe("alice");
+  });
+
+  it("drops queued standard UPDATE and DELETE after a switch", async () => {
+    const h = makeHarness({}, [makeMessage("m1"), makeMessage("m2")], { deferSetMessages: true });
+
+    await handleMessageRealtimePayload(
+      { eventType: "UPDATE", new: { ...makeMessage("m1"), content: "edited" }, old: {} },
+      h.deps,
+    );
+    await handleMessageRealtimePayload(
+      { eventType: "DELETE", new: {}, old: makeMessage("m2") },
+      h.deps,
+    );
+    expect(h.pendingCount()).toBe(2);
+
+    h.setCurrent(false);
+    h.applyPending();
+
+    expect(h.messages().map((m) => m.id)).toEqual(["m1", "m2"]);
+    expect(h.messages().find((m) => m.id === "m1")?.content).toBe("content-m1");
+  });
+
+  it("still applies queued standard UPDATE and DELETE for the active conversation", async () => {
+    const h = makeHarness({}, [makeMessage("m1"), makeMessage("m2")], { deferSetMessages: true });
+
+    await handleMessageRealtimePayload(
+      { eventType: "UPDATE", new: { ...makeMessage("m1"), content: "edited" }, old: {} },
+      h.deps,
+    );
+    await handleMessageRealtimePayload(
+      { eventType: "DELETE", new: {}, old: makeMessage("m2") },
+      h.deps,
+    );
+    h.applyPending();
+
+    expect(h.messages().map((m) => m.id)).toEqual(["m1"]);
+    expect(h.messages()[0].content).toBe("edited");
+  });
+});
+
+describe("handleReactionRealtimePayload — deferred updaters", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function makeDeferredReactionHarness(initial: Message[] = []) {
     const state = { messages: [...initial] };
     const calls = { setMessages: 0, fetchReactions: 0 };
+    const pendingUpdaters: Array<Parameters<ReactionRealtimeDeps["setMessages"]>[0]> = [];
     let current = true;
     const deps: ReactionRealtimeDeps = {
       isCurrent: () => current,
       messagesRef: { current: state.messages } as ReactionRealtimeDeps["messagesRef"],
       setMessages: (updater) => {
         calls.setMessages += 1;
+        pendingUpdaters.push(updater);
+      },
+      fetchReactions: vi.fn(async () => {
+        calls.fetchReactions += 1;
+        return {};
+      }),
+    };
+    return {
+      deps,
+      messages: () => state.messages,
+      calls,
+      setCurrent: (v: boolean) => { current = v; },
+      applyPending: () => {
+        for (const updater of pendingUpdaters.splice(0)) {
+          state.messages = typeof updater === "function" ? updater(state.messages) : updater;
+        }
+      },
+      pendingCount: () => pendingUpdaters.length,
+    };
+  }
+
+  it("drops queued reaction INSERT/DELETE after a switch", () => {
+    const h = makeDeferredReactionHarness([makeMessage("m1", { reactions: [{ id: "r1", emoji: "👍", user_id: "u", message_id: "m1" }] })]);
+
+    handleReactionRealtimePayload(
+      { eventType: "INSERT", new: { id: "r2", message_id: "m1", emoji: "🔥", user_id: "u" } as Reaction, old: {} },
+      h.deps,
+    );
+    handleReactionRealtimePayload(
+      { eventType: "DELETE", new: {}, old: { id: "r1", message_id: "m1", emoji: "👍", user_id: "u" } as Reaction },
+      h.deps,
+    );
+    expect(h.pendingCount()).toBe(2);
+
+    h.setCurrent(false);
+    h.applyPending();
+
+    expect(h.messages()[0].reactions?.map((r) => r.id)).toEqual(["r1"]);
+  });
+
+  it("drops a queued reaction refresh after a switch", async () => {
+    const h = makeDeferredReactionHarness([makeMessage("m1")]);
+
+    handleReactionRealtimePayload(
+      { refresh: true, table: "message_reactions", eventType: "INSERT", keys: {} },
+      h.deps,
+    );
+    await flush();
+    expect(h.pendingCount()).toBe(1);
+
+    h.setCurrent(false);
+    h.applyPending();
+
+    expect(h.messages()[0].reactions).toEqual([]);
+  });
+
+  it("still applies queued reaction changes for the active conversation", async () => {
+    const h = makeDeferredReactionHarness([makeMessage("m1")]);
+
+    handleReactionRealtimePayload(
+      { eventType: "INSERT", new: { id: "r1", message_id: "m1", emoji: "👍", user_id: "u" } as Reaction, old: {} },
+      h.deps,
+    );
+    h.applyPending();
+
+    expect(h.messages()[0].reactions).toHaveLength(1);
+  });
+});
+
+describe("handleReactionRealtimePayload — conversation guard", () => {
+  function makeReactionHarness(initial: Message[] = [], options: { deferSetMessages?: boolean } = {}) {
+    const state = { messages: [...initial] };
+    const calls = { setMessages: 0, fetchReactions: 0 };
+    const pendingUpdaters: Array<Parameters<ReactionRealtimeDeps["setMessages"]>[0]> = [];
+    let current = true;
+    const deps: ReactionRealtimeDeps = {
+      isCurrent: () => current,
+      messagesRef: { current: state.messages } as ReactionRealtimeDeps["messagesRef"],
+      setMessages: (updater) => {
+        calls.setMessages += 1;
+        if (options.deferSetMessages) {
+          pendingUpdaters.push(updater);
+          return;
+        }
         state.messages = typeof updater === "function" ? updater(state.messages) : updater;
       },
       fetchReactions: vi.fn(async () => {
@@ -453,7 +702,18 @@ describe("handleReactionRealtimePayload — conversation guard", () => {
         return { "m1": [{ id: "r1", emoji: "👍", user_id: "u", message_id: "m1" }] };
       }),
     };
-    return { deps, messages: () => state.messages, calls, setCurrent: (v: boolean) => { current = v; } };
+    return {
+      deps,
+      messages: () => state.messages,
+      calls,
+      setCurrent: (v: boolean) => { current = v; },
+      applyPending: () => {
+        for (const updater of pendingUpdaters.splice(0)) {
+          state.messages = typeof updater === "function" ? updater(state.messages) : updater;
+        }
+      },
+      pendingCount: () => pendingUpdaters.length,
+    };
   }
 
   it("ignores events once the conversation is no longer active", () => {
