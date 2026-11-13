@@ -52,7 +52,7 @@ import {
   ChevronLeft, ChevronRight, Play, Mic, Pin, Copy
 } from "lucide-react";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
-import { signMessageMedia, encodeFile, decodeFile, encodeMusic, decodeMusic, collectMediaUrls, prefetchChatUrls } from "@/lib/mediaUrl";
+import { signMessageMedia, encodeFile, decodeFile, encodeMusic, decodeMusic } from "@/lib/mediaUrl";
 import { compressImageForUpload } from "@/lib/imageCompress";
 import { getCachedMessages, setCachedMessages } from "@/lib/chatCache";
 import { parseServerDate, serverDateMs } from "@/lib/dates";
@@ -74,6 +74,9 @@ import { BarChart3, Users as UsersIcon, Settings as SettingsIcon } from "lucide-
 import { isStatusActive } from "@/lib/customStatus";
 import { GroupAvatar } from "@/components/chat/GroupAvatar";
 import { GroupSettingsDialog } from "@/components/chat/GroupSettingsDialog";
+import { handleMessageRealtimePayload, handleReactionRealtimePayload } from "./messageRealtime";
+import { fetchConversationMessages } from "./messageFetch";
+import { reconcileLiveMessage as reconcileLiveMessageState } from "./reconcileMessage";
 
 
 
@@ -86,14 +89,14 @@ async function uploadChatMedia(bucket: "chat-images" | "chat-videos" | "chat-voi
   if (error) throw error;
   return signed.publicUrl;
 }
-interface Reaction {
+export interface Reaction {
   id: string;
   emoji: string;
   user_id: string;
   message_id: string;
 }
 
-interface Message {
+export interface Message {
   id: string;
   content: string;
   sender_id: string | null;
@@ -134,16 +137,6 @@ interface Profile {
   custom_status_expires_at?: string | null;
 }
 
-type MariaDbRefreshPayload = {
-  refresh?: boolean;
-  table?: string;
-  eventType?: string;
-  actor_id?: string;
-  keys?: Record<string, string | number>;
-  columns?: string[];
-  record?: Record<string, unknown>;
-};
-
 type AttachmentKind = 'image' | 'video' | 'music' | 'file';
 
 interface MediaPreview {
@@ -169,7 +162,6 @@ interface ChatViewProps {
 }
 
 const EMOJI_OPTIONS = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
-const MESSAGES_PER_PAGE = 30;
 
 export function ChatView({ conversationId: conversationIdProp, onBack, isMobile = false, channel = "dm", isActive = true }: ChatViewProps) {
   const { user } = useAuth();
@@ -276,6 +268,15 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   const [loadingMore, setLoadingMore] = useState(false);
   const loadingMoreRef = useRef(false);
   const fetchMessagesRef = useRef<((loadMore?: boolean) => Promise<void>) | null>(null);
+  // Incremented whenever the active conversation changes. In-flight fetches
+  // capture the epoch at start and bail before touching state if it moved on,
+  // so a slow DM-A request can never merge into DM-B's messages or cache.
+  const conversationEpochRef = useRef(0);
+  // Tracks the conversation that async work (fetches, realtime callbacks,
+  // debounced writes) currently belongs to. Refuses stale writes after a
+  // conversation switch. Synced by the effect declared just above the
+  // fetch/subscription effect so it is always current before fetches start.
+  const activeConversationRef = useRef<string | null>(conversationId);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [isTabVisible, setIsTabVisible] = useState(!document.hidden);
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
@@ -380,6 +381,9 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   const fetchPinnedMessages = useCallback(async () => {
     if (!supportsPinning) return;
     if (isDM && !conversationIdProp) return;
+    // The queries below are async — remember which conversation this fetch
+    // belongs to so a switch cannot apply its results to the new one.
+    const targetConversation = activeConversationRef.current;
 
     let q: any = (supabase as any)
       .from(messagesTable)
@@ -406,6 +410,9 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       sender: msg.sender_id === user?.id ? ownSenderProfile : msg.sender_id ? profilesMap.get(msg.sender_id) : undefined,
     }));
 
+    // A conversation switch must not let this conversation's pinned messages
+    // leak into the new one's header.
+    if (activeConversationRef.current !== targetConversation) return;
     setPinnedMessages(pinnedWithSenders as Message[]);
   }, [conversationIdProp, isDM, supportsPinning, messagesTable]);
 
@@ -533,71 +540,28 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   }, [messagesTable, showReceipts, user?.id]);
 
   const reconcileLiveMessage = useCallback((incoming: Message, matchImageUrl = incoming.image_url || null) => {
-    const now = Date.now();
-    let optimisticId: string | undefined;
-    if (incoming.sender_id === user?.id && !messagesRef.current.some((message) => message.id === incoming.id)) {
-      for (const [id, pending] of pendingOutgoingMessagesRef.current) {
-        if (now - pending.created_at > 120_000) {
-          pendingOutgoingMessagesRef.current.delete(id);
-          continue;
-        }
-        if (pending.content === incoming.content
-          && pending.reply_to_id === (incoming.reply_to_id || null)
-          && pending.image_url === matchImageUrl) {
-          optimisticId = id;
-          pendingOutgoingMessagesRef.current.delete(id);
-          break;
-        }
-      }
-    }
-
-    setMessages((previous) => {
-      const existingIndex = previous.findIndex((message) => message.id === incoming.id);
-      if (existingIndex >= 0) {
-        const existing = previous[existingIndex];
-        const next = previous.slice();
-        next[existingIndex] = {
-          ...incoming,
-          ...existing,
-          sender: existing.sender || incoming.sender,
-          replied_message: existing.replied_message || incoming.replied_message,
-          image_url: existing.image_url || incoming.image_url,
-          reactions: existing.reactions?.length ? existing.reactions : incoming.reactions || [],
-          _status: existing._status === 'sending' ? 'sent' : existing._status || 'sent',
-        };
-        return next;
-      }
-
-      const optimisticIndex = optimisticId
-        ? previous.findIndex((message) => message.id === optimisticId)
-        : -1;
-      if (optimisticIndex >= 0) {
-        const optimistic = previous[optimisticIndex];
-        const next = previous.slice();
-        next[optimisticIndex] = {
-          ...optimistic,
-          ...incoming,
-          image_url: optimistic.image_url || incoming.image_url,
-          reactions: optimistic.reactions || incoming.reactions || [],
-          replied_message: optimistic.replied_message || incoming.replied_message,
-          _status: 'sent',
-        };
-        return next.sort((left, right) =>
-          serverDateMs(left.created_at) - serverDateMs(right.created_at));
-      }
-
-      if (!previous.length || serverDateMs(previous[previous.length - 1].created_at) <= serverDateMs(incoming.created_at)) {
-        return [...previous, incoming];
-      }
-      const next = [...previous, incoming];
-      return next.sort((left, right) =>
-        serverDateMs(left.created_at) - serverDateMs(right.created_at));
+    reconcileLiveMessageState(incoming, matchImageUrl, {
+      userId: user?.id,
+      activeConversationRef,
+      messagesRef,
+      pendingOutgoingMessagesRef,
+      setMessages,
     });
   }, [user?.id]);
 
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  // Sync the active-conversation marker and bump the fetch epoch BEFORE the
+  // fetch/subscription effect below runs. fetchMessages captures the epoch
+  // synchronously when it is invoked, so this ordering is what lets the new
+  // conversation's fetch start with a fresh epoch while requests started
+  // under the previous conversation observe the bump and bail via isStale().
+  useEffect(() => {
+    activeConversationRef.current = conversationId;
+    conversationEpochRef.current += 1;
+  }, [conversationId]);
 
   useEffect(() => {
     if (conversationId && isActive) {
@@ -608,173 +572,42 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       const subFilter = isDM
         ? { event: "*" as const, schema: "public", table: messagesTable, filter: `conversation_id=eq.${conversationIdProp}` }
         : { event: "*" as const, schema: "public", table: messagesTable };
+      const messageRealtimeDeps = {
+        isCurrent: () => activeConversationRef.current === conversationId,
+        userId: user?.id,
+        ownSenderProfile,
+        messagesTable,
+        isAnnouncements,
+        isActive,
+        showReceipts,
+        messagesRef,
+        setMessages,
+        reconcileLiveMessage,
+        refreshReceiptStatuses,
+        refreshTimerRef: realtimeRefreshTimerRef,
+        receiptTimerRef: receiptRefreshTimerRef,
+        refetch: () => { void fetchMessagesRef.current?.(); },
+        scrollAreaRef,
+        scrollToBottom,
+        supabase,
+      };
       const channel = supabase
         .channel(`${messagesTable}:${conversationId}`)
         .on(
           "postgres_changes",
           subFilter as any,
-          async (payload) => {
-            const change = payload as unknown as MariaDbRefreshPayload;
-            if (change.refresh) {
-              if (change.eventType === 'DELETE' && change.keys?.id) {
-                setMessages((previous) => previous.filter((message) => message.id !== change.keys.id));
-                return;
-              }
-
-              if (change.keys?.id && change.eventType !== 'INSERT'
-                && !messagesRef.current.some((message) => message.id === change.keys.id)) return;
-
-              if (change.eventType === 'INSERT' && change.record?.id && change.table === messagesTable) {
-                const received = {
-                  ...change.record,
-                  sender: (change.record.sender as Message['sender'] | undefined)
-                    || (change.record.sender_id === user?.id ? ownSenderProfile : undefined),
-                  reactions: [],
-                  _status: 'sent' as const,
-                } as Message;
-                reconcileLiveMessage(received);
-                void Promise.all([
-                  received.sender_id
-                    ? received.sender_id === user?.id
-                      ? Promise.resolve({ data: ownSenderProfile })
-                      : supabase.from('profiles').select('username, display_name, avatar_url').eq('id', received.sender_id).single()
-                    : Promise.resolve({ data: null }),
-                  received.reply_to_id
-                    ? (supabase as any).from(messagesTable).select('id, content, sender_id').eq('id', received.reply_to_id).maybeSingle()
-                    : Promise.resolve({ data: null }),
-                  signMessageMedia(received.image_url).catch(() => received.image_url),
-                ]).then(async ([senderResult, replyResult, signedImageUrl]) => {
-                  let repliedMessage: Message['replied_message'];
-                  if (replyResult.data) {
-                    const replySenderResult = replyResult.data.sender_id
-                      ? await supabase.from('profiles').select('username, display_name').eq('id', replyResult.data.sender_id).single()
-                      : { data: null };
-                    repliedMessage = { ...replyResult.data, sender: replySenderResult.data || undefined };
-                  }
-                  setMessages((previous) => previous.map((message) => message.id === received.id
-                    ? {
-                      ...message,
-                      image_url: signedImageUrl,
-                      sender: senderResult.data || received.sender,
-                      replied_message: repliedMessage,
-                    }
-                    : message));
-                }).catch((error) => console.warn('Could not enrich live message:', error));
-                const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
-                if (viewport && viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 250) {
-                  setTimeout(() => scrollToBottom('smooth'), 60);
-                }
-                return;
-              }
-
-              const columns = change.columns as string[] | undefined;
-              const receiptOnly = change.table === 'messages'
-                && change.eventType === 'UPDATE'
-                && columns?.length
-                && columns.every((column) => column === 'read_at' || column === 'delivered_at');
-              if (receiptOnly) {
-                if (!receiptRefreshTimerRef.current) {
-                  receiptRefreshTimerRef.current = setTimeout(() => {
-                    receiptRefreshTimerRef.current = null;
-                    void refreshReceiptStatuses();
-                  }, 100);
-                }
-                return;
-              }
-
-              if (!realtimeRefreshTimerRef.current) {
-                realtimeRefreshTimerRef.current = setTimeout(() => {
-                  realtimeRefreshTimerRef.current = null;
-                  void fetchMessagesRef.current?.();
-                }, 60);
-              }
-              return;
-            }
-            if (payload.eventType === "INSERT") {
-              const newMsg = payload.new as Message;
-              if (newMsg.sender_id) {
-                if (newMsg.sender_id === user?.id) {
-                  newMsg.sender = ownSenderProfile;
-                } else {
-                  const { data: sender } = await supabase
-                    .from("profiles")
-                    .select("username, display_name, avatar_url")
-                    .eq("id", newMsg.sender_id)
-                    .single();
-                  newMsg.sender = sender || undefined;
-                }
-              }
-              // Fetch replied message data if exists
-              if (newMsg.reply_to_id) {
-                const { data: repliedMsg } = await (supabase as any)
-                  .from(messagesTable)
-                  .select("id, content, sender_id")
-                  .eq("id", newMsg.reply_to_id)
-                  .maybeSingle();
-                if (repliedMsg) {
-                  const { data: replySender } = repliedMsg.sender_id
-                    ? await supabase
-                        .from("profiles")
-                        .select("username, display_name")
-                        .eq("id", repliedMsg.sender_id)
-                        .single()
-                    : { data: null };
-                  newMsg.replied_message = {
-                    ...repliedMsg,
-                    sender: replySender || undefined,
-                  };
-                }
-              }
-              newMsg.reactions = [];
-              const rawImageUrl = newMsg.image_url || null;
-              newMsg.image_url = await signMessageMedia(newMsg.image_url);
-              reconcileLiveMessage({ ...newMsg, _status: "sent" }, rawImageUrl);
-              // Scroll to bottom only if user is already near the bottom
-              setTimeout(() => {
-                const v = scrollAreaRef.current?.querySelector(
-                  "[data-radix-scroll-area-viewport]",
-                ) as HTMLElement | null;
-                if (!v) return;
-                const nearBottom = v.scrollHeight - v.scrollTop - v.clientHeight < 250;
-                const isOwn = newMsg.sender_id === user?.id;
-                if (nearBottom || isOwn) scrollToBottom("smooth");
-              }, 100);
-
-              if (isAnnouncements && isActive && user?.id) {
-                void markAnnouncementsRead(user.id)
-                  .then(() => window.dispatchEvent(new CustomEvent("announcements-read")))
-                  .catch((error) => console.error("Error marking announcements as read:", error));
-              }
-            } else if (payload.eventType === "UPDATE") {
-              const updatedMsg = payload.new as Message;
-              setMessages((prev) =>
-                prev.map((m) => {
-                  if (m.id === updatedMsg.id) {
-                    const newStatus = !showReceipts
-                      ? m._status
-                      : updatedMsg.read_at
-                      ? ("read" as const)
-                      : updatedMsg.delivered_at
-                        ? ("delivered" as const)
-                        : (m._status === "sending" ? "sent" as const : m._status);
-                    return {
-                      ...m,
-                      ...updatedMsg,
-                      reactions: m.reactions,
-                      _status: newStatus,
-                    };
-                  }
-                  return m;
-                })
-              );
-            } else if (payload.eventType === "DELETE") {
-              const deletedMsg = payload.old as Message;
-              setMessages((prev) => prev.filter((m) => m.id !== deletedMsg.id));
-            }
+          (payload) => {
+            void handleMessageRealtimePayload(payload, messageRealtimeDeps);
           }
         )
         .subscribe();
 
+      const reactionRealtimeDeps = {
+        isCurrent: () => activeConversationRef.current === conversationId,
+        messagesRef,
+        setMessages,
+        fetchReactions,
+      };
       const reactionsChannel = supabase
         .channel(`reactions:${conversationId}`)
         .on(
@@ -785,42 +618,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
             table: "message_reactions",
           },
           (payload) => {
-            const change = payload as unknown as MariaDbRefreshPayload;
-            if (change.refresh) {
-              const messageIds = messagesRef.current.map((message) => message.id);
-              void fetchReactions(messageIds).then((reactionMap) => {
-                setMessages((previous) => previous.map((message) => ({
-                  ...message,
-                  reactions: reactionMap[message.id] || [],
-                })));
-              });
-              return;
-            }
-            if (payload.eventType === "INSERT") {
-              const newReaction = payload.new as Reaction;
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === newReaction.message_id
-                    ? { 
-                        ...m, 
-                        reactions: [...(m.reactions || []).filter(r => r.id !== newReaction.id), newReaction] 
-                      }
-                    : m
-                )
-              );
-            } else if (payload.eventType === "DELETE") {
-              const deletedReaction = payload.old as Reaction;
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === deletedReaction.message_id
-                    ? {
-                        ...m,
-                        reactions: (m.reactions || []).filter((r) => r.id !== deletedReaction.id),
-                      }
-                    : m
-                )
-              );
-            }
+            handleReactionRealtimePayload(payload, reactionRealtimeDeps);
           }
         )
         .subscribe();
@@ -918,11 +716,8 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   // Track the currently-loaded conversation so async writes (debounced cache
   // persistence, in-flight fetches) can refuse to apply when the conversation
   // has switched underneath them. Defense-in-depth against cross-DM bleed.
-  const activeConversationRef = useRef<string | null>(conversationId);
-  useEffect(() => {
-    activeConversationRef.current = conversationId;
-  }, [conversationId]);
-
+  // The ref itself is declared near conversationEpochRef and synced by the
+  // effect placed before the fetch/subscription effect above.
   useEffect(() => {
     // Reset state when conversation changes. Hydrate from cache synchronously
     // so the UI never flashes empty while the network fetch is in flight.
@@ -938,6 +733,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     initialScrollSettledRef.current = false;
     userScrolledRef.current = false;
     loadingMoreRef.current = false;
+    setLoadingMore(false);
     const presetTimer = setTimeout(() => setShowQuickPresets(true), 1000);
     // Independent settle guarantee — ensures scroll-up pagination becomes
     // available even if the per-message scroll effect keeps cancelling its
@@ -1037,6 +833,9 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
 
   const fetchOtherUser = async () => {
     if (!conversationId || !user) return;
+    // Every await below can outlive the conversation it was started for —
+    // refuse to apply header/member state once the user has switched.
+    const isCurrent = () => activeConversationRef.current === conversationId;
 
     // Look up whether this conversation is a group so we can branch the
     // header / mention candidates / read-receipt behavior.
@@ -1069,6 +868,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
         .filter(Boolean) as Profile[];
       const myRole = (rows ?? []).find((r: any) => r.user_id === user.id)?.role ?? null;
 
+      if (!isCurrent()) return;
       setIsGroupConv(true);
       setGroupMembers(orderedMembers);
       setGroupInfo({ name: conv?.name ?? null, my_role: myRole as any });
@@ -1087,6 +887,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       return;
     }
 
+    if (!isCurrent()) return;
     setIsGroupConv(false);
     setGroupMembers([]);
     setGroupInfo({ name: null, my_role: null });
@@ -1103,6 +904,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
         .select("*")
         .eq("id", members[0].user_id)
         .single();
+      if (!isCurrent()) return;
       setOtherUser(profile);
       if (profile) {
         setDmMembers([
@@ -1119,146 +921,31 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
 
 
   const fetchMessages = async (loadMore = false) => {
-    if (!conversationId) return;
-
-    if (loadMore) {
-      if (loadingMoreRef.current || !hasMore || messagesRef.current.length === 0) return;
-      loadingMoreRef.current = true;
-      setLoadingMore(true);
-    }
-
-    const currentMessages = messagesRef.current;
-    const oldestMessage = loadMore && currentMessages.length > 0 ? currentMessages[0] : null;
-    
-    let query: any = (supabase as any)
-      .from(messagesTable)
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(MESSAGES_PER_PAGE);
-    if (isDM) query = query.eq("conversation_id", conversationIdProp);
-
-    if (oldestMessage) {
-      query = query.lt("created_at", oldestMessage.created_at);
-    }
-
-    const { data, error } = await query;
-
-    if (error) {
-      console.error("Error fetching messages:", error);
-      setLoadingMore(false);
-      loadingMoreRef.current = false;
-      return;
-    }
-
-    // Check if there are more messages
-    setHasMore((data || []).length === MESSAGES_PER_PAGE);
-
-    const messageIds = (data || []).map((m: any) => m.id);
-    const senderIds = [...new Set((data || []).map((m: any) => m.sender_id).filter((id: string | null) => id && id !== user?.id))] as string[];
-    const replyToIds = [...new Set((data || []).map((m: any) => m.reply_to_id).filter(Boolean))] as string[];
-
-    // These reads are independent; issue them together instead of making each
-    // chat load wait through multiple database round trips in sequence.
-    const [reactionsMap, profileResult, repliedResult] = await Promise.all([
-      fetchReactions(messageIds),
-      // Sign every media URL in the page with one batched request instead of
-      // one API call per message.
-      prefetchChatUrls((data || []).flatMap((m: any) => collectMediaUrls(m.image_url))),
-      senderIds.length > 0
-        ? supabase
-          .from("profiles")
-          .select("id, username, display_name, avatar_url")
-          .in("id", senderIds)
-        : Promise.resolve({ data: [] }),
-      replyToIds.length > 0
-        ? (supabase as any)
-          .from(messagesTable)
-          .select("id, content, sender_id")
-          .in("id", replyToIds)
-        : Promise.resolve({ data: [] }),
-    ]);
-    const profiles = profileResult.data;
-    const profilesMap = new Map((profiles || []).map((p) => [p.id, p]));
-    const repliedMessages = repliedResult.data;
-
-    // Fetch sender profiles for replied messages
-    const replySenderIds = [...new Set(((repliedMessages || []) as any[]).map((m: any) => m.sender_id).filter((id: string | null) => id && id !== user?.id))] as string[];
-    const { data: replyProfiles } = replySenderIds.length > 0
-      ? await supabase
-          .from("profiles")
-          .select("id, username, display_name")
-          .in("id", replySenderIds)
-      : { data: [] };
-    
-    const replyProfilesMap = new Map((replyProfiles || []).map((p) => [p.id, p]));
-    const repliedMessagesMap = new Map(((repliedMessages || []) as any[]).map((m: any) => {
-      const sender = m.sender_id ? replyProfilesMap.get(m.sender_id) : undefined;
-      return [m.id, { ...m, sender }];
-    }));
-
-    const messagesWithSenders = await Promise.all((data || []).map(async (msg: any) => {
-      const sender = msg.sender_id === user?.id ? ownSenderProfile : msg.sender_id ? profilesMap.get(msg.sender_id) : undefined;
-      const repliedMessage = msg.reply_to_id ? repliedMessagesMap.get(msg.reply_to_id) : undefined;
-      const signedImageUrl = await signMessageMedia(msg.image_url);
-      return {
-        ...msg,
-        image_url: signedImageUrl,
-        sender: sender ? { username: sender.username, display_name: sender.display_name, avatar_url: sender.avatar_url } : undefined,
-        reactions: reactionsMap[msg.id] || [],
-        replied_message: repliedMessage ? {
-          ...repliedMessage,
-          sender: repliedMessage.sender_id === user?.id ? ownSenderProfile : repliedMessage.sender,
-        } : undefined,
-        _status: !showReceipts
-          ? ("sent" as const)
-          : msg.read_at
-            ? ("read" as const)
-            : (msg as any).delivered_at
-              ? ("delivered" as const)
-              : ("sent" as const),
-      };
-    }));
-    messagesWithSenders.reverse(); // ascending order
-
-    if (loadMore) {
-      // Preserve scroll position when loading older messages
-      const scrollArea = scrollAreaRef.current;
-      const scrollViewport = scrollArea?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
-      const previousScrollHeight = scrollViewport?.scrollHeight || 0;
-      const previousScrollTop = scrollViewport?.scrollTop || 0;
-
-      setMessages((prev) => {
-        const existingIds = new Set(prev.map((m) => m.id));
-        const fresh = messagesWithSenders.filter((m) => !existingIds.has(m.id));
-        return [...fresh, ...prev];
-      });
-
-      // Restore scroll position after new messages are added
-      requestAnimationFrame(() => {
-        if (scrollViewport) {
-          const newScrollHeight = scrollViewport.scrollHeight;
-          scrollViewport.scrollTop = previousScrollTop + (newScrollHeight - previousScrollHeight);
-        }
-      });
-      setLoadingMore(false);
-      loadingMoreRef.current = false;
-    } else {
-      // Merge fetched page with whatever we already have (cache + realtime),
-      // so we don't drop older cached history or messages that arrived
-      // optimistically/via realtime while the fetch was in flight.
-      isInitialLoad.current = true;
-      initialScrollSettledRef.current = false;
-      userScrolledRef.current = false;
-      setMessages((prev) => {
-        const merged = new Map<string, Message>();
-        for (const m of prev) merged.set(m.id, m);
-        for (const m of messagesWithSenders) merged.set(m.id, m);
-        return Array.from(merged.values()).sort(
-          (a, b) => serverDateMs(a.created_at) - serverDateMs(b.created_at),
-        );
-      });
-    }
+    await fetchConversationMessages(loadMore, {
+      conversationId,
+      conversationEpochRef,
+      activeConversationRef,
+      isDM,
+      messagesTable,
+      conversationIdProp,
+      userId: user?.id,
+      ownSenderProfile,
+      showReceipts,
+      hasMore,
+      messagesRef,
+      setMessages,
+      setHasMore,
+      setLoadingMore,
+      loadingMoreRef,
+      isInitialLoad,
+      initialScrollSettledRef,
+      userScrolledRef,
+      scrollAreaRef,
+      fetchReactions,
+      supabase,
+    });
   };
+
 
   fetchMessagesRef.current = fetchMessages;
 
@@ -1389,7 +1076,8 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     }
 
     const tempId = crypto.randomUUID();
-    const optimisticImageUrl = imageUrlJson ? await signMessageMedia(imageUrlJson) : null;
+    // Signing is best-effort — never let it block sending the message.
+    const optimisticImageUrl = imageUrlJson ? await signMessageMedia(imageUrlJson).catch(() => imageUrlJson) : null;
     const optimisticMessage: Message = {
       id: tempId,
       content: contentToSend,
@@ -1413,13 +1101,20 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       _status: "sending",
     };
 
-    pendingOutgoingMessagesRef.current.set(tempId, {
-      content: contentToSend,
-      reply_to_id: replyTarget?.id || null,
-      image_url: imageUrlJson || null,
-      created_at: Date.now(),
-    });
-    setMessages((prev) => [...prev, optimisticMessage]);
+    // Media upload and signing above are async — the user may have switched
+    // conversations meanwhile. The DB insert below must still run (it targets
+    // this conversation via the closure), but the optimistic message and its
+    // reconciliation marker belong to this conversation's state only.
+    const stillActive = activeConversationRef.current === conversationId;
+    if (stillActive) {
+      pendingOutgoingMessagesRef.current.set(tempId, {
+        content: contentToSend,
+        reply_to_id: replyTarget?.id || null,
+        image_url: imageUrlJson || null,
+        created_at: Date.now(),
+      });
+      setMessages((prev) => [...prev, optimisticMessage]);
+    }
 
     const insertPayload: any = {
       sender_id: user.id,
@@ -2119,6 +1814,9 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                       longPressFiredRef.current = true;
                       try { (navigator as any).vibrate?.(15); } catch { /* vibration unavailable */ }
                       try { window.getSelection()?.removeAllRanges(); } catch { /* selection API unavailable */ }
+                      // The press may have started in a conversation the user
+                      // has since left — don't open the action sheet for it.
+                      if (activeConversationRef.current !== conversationId) return;
                       setMobileActionMessage(message);
                     }, 400);
                   }}
