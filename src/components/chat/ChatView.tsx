@@ -276,6 +276,10 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   const [loadingMore, setLoadingMore] = useState(false);
   const loadingMoreRef = useRef(false);
   const fetchMessagesRef = useRef<((loadMore?: boolean) => Promise<void>) | null>(null);
+  // Incremented whenever the active conversation changes. In-flight fetches
+  // capture the epoch at start and bail before touching state if it moved on,
+  // so a slow DM-A request can never merge into DM-B's messages or cache.
+  const conversationEpochRef = useRef(0);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [isTabVisible, setIsTabVisible] = useState(!document.hidden);
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
@@ -644,6 +648,9 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                     : Promise.resolve({ data: null }),
                   signMessageMedia(received.image_url).catch(() => received.image_url),
                 ]).then(async ([senderResult, replyResult, signedImageUrl]) => {
+                  // The user may have switched conversations while enrichment
+                  // was in flight — never merge into the new conversation's state.
+                  if (activeConversationRef.current !== conversationId) return;
                   let repliedMessage: Message['replied_message'];
                   if (replyResult.data) {
                     const replySenderResult = replyResult.data.sender_id
@@ -651,6 +658,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                       : { data: null };
                     repliedMessage = { ...replyResult.data, sender: replySenderResult.data || undefined };
                   }
+                  if (activeConversationRef.current !== conversationId) return;
                   setMessages((previous) => previous.map((message) => message.id === received.id
                     ? {
                       ...message,
@@ -662,7 +670,10 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                 }).catch((error) => console.warn('Could not enrich live message:', error));
                 const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
                 if (viewport && viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 250) {
-                  setTimeout(() => scrollToBottom('smooth'), 60);
+                  setTimeout(() => {
+                    if (activeConversationRef.current !== conversationId) return;
+                    scrollToBottom('smooth');
+                  }, 60);
                 }
                 return;
               }
@@ -927,6 +938,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   useEffect(() => {
     // Reset state when conversation changes. Hydrate from cache synchronously
     // so the UI never flashes empty while the network fetch is in flight.
+    conversationEpochRef.current += 1;
     const cached = getCachedMessages<Message>(conversationId);
     setMessages(cached && cached.length > 0 ? cached : []);
     pendingOutgoingMessagesRef.current.clear();
@@ -1121,6 +1133,12 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
 
   const fetchMessages = async (loadMore = false) => {
     if (!conversationId) return;
+    const epoch = conversationEpochRef.current;
+    // True when the user switched conversations (or a newer fetch cycle
+    // started) while this request was in flight. Stale requests must not
+    // touch messages, pagination, loading flags, or scroll position — the
+    // conversation-change effect owns resetting those now.
+    const isStale = () => epoch !== conversationEpochRef.current || activeConversationRef.current !== conversationId;
 
     if (loadMore) {
       if (loadingMoreRef.current || !hasMore || messagesRef.current.length === 0) return;
@@ -1144,15 +1162,14 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
 
     const { data, error } = await query;
 
+    if (isStale()) return;
+
     if (error) {
       console.error("Error fetching messages:", error);
       setLoadingMore(false);
       loadingMoreRef.current = false;
       return;
     }
-
-    // Check if there are more messages
-    setHasMore((data || []).length === MESSAGES_PER_PAGE);
 
     const messageIds = (data || []).map((m: any) => m.id);
     const senderIds = [...new Set((data || []).map((m: any) => m.sender_id).filter((id: string | null) => id && id !== user?.id))] as string[];
@@ -1264,6 +1281,13 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       }));
     }
 
+    if (isStale()) return;
+
+    // Check if there are more messages — applied only after the staleness
+    // guard so a superseded request cannot clobber the new conversation's
+    // pagination state.
+    setHasMore((data || []).length === MESSAGES_PER_PAGE);
+
     if (loadMore) {
       // Preserve scroll position when loading older messages
       const scrollArea = scrollAreaRef.current;
@@ -1272,6 +1296,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       const previousScrollTop = scrollViewport?.scrollTop || 0;
 
       setMessages((prev) => {
+        if (isStale()) return prev;
         const existingIds = new Set(prev.map((m) => m.id));
         const fresh = messagesWithSenders.filter((m) => !existingIds.has(m.id));
         return [...fresh, ...prev];
@@ -1279,10 +1304,9 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
 
       // Restore scroll position after new messages are added
       requestAnimationFrame(() => {
-        if (scrollViewport) {
-          const newScrollHeight = scrollViewport.scrollHeight;
-          scrollViewport.scrollTop = previousScrollTop + (newScrollHeight - previousScrollHeight);
-        }
+        if (isStale() || !scrollViewport) return;
+        const newScrollHeight = scrollViewport.scrollHeight;
+        scrollViewport.scrollTop = previousScrollTop + (newScrollHeight - previousScrollHeight);
       });
       setLoadingMore(false);
       loadingMoreRef.current = false;
@@ -1294,6 +1318,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       initialScrollSettledRef.current = false;
       userScrolledRef.current = false;
       setMessages((prev) => {
+        if (isStale()) return prev;
         const merged = new Map<string, Message>();
         for (const m of prev) merged.set(m.id, m);
         for (const m of messagesWithSenders) merged.set(m.id, m);
