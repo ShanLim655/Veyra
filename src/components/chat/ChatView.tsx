@@ -52,11 +52,10 @@ import {
   ChevronLeft, ChevronRight, Play, Mic, Pin, Copy
 } from "lucide-react";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
-import { signMessageMedia, encodeFile, decodeFile, encodeMusic, decodeMusic, collectMediaUrls, prefetchChatUrls } from "@/lib/mediaUrl";
+import { signMessageMedia, encodeFile, decodeFile, encodeMusic, decodeMusic } from "@/lib/mediaUrl";
 import { compressImageForUpload } from "@/lib/imageCompress";
 import { getCachedMessages, setCachedMessages } from "@/lib/chatCache";
 import { parseServerDate, serverDateMs } from "@/lib/dates";
-import { mergeMessagePage, prependOlderMessages } from "@/lib/messageMerge";
 import { exceedsMaxUploadSize, MAX_UPLOAD_SIZE_LABEL } from "@/lib/uploadLimits";
 import { MessageFileCard } from "@/components/chat/MessageFileCard";
 import { ChatImage } from "@/components/chat/ChatImage";
@@ -76,6 +75,7 @@ import { isStatusActive } from "@/lib/customStatus";
 import { GroupAvatar } from "@/components/chat/GroupAvatar";
 import { GroupSettingsDialog } from "@/components/chat/GroupSettingsDialog";
 import { handleMessageRealtimePayload, handleReactionRealtimePayload } from "./messageRealtime";
+import { fetchConversationMessages } from "./messageFetch";
 
 
 
@@ -161,7 +161,6 @@ interface ChatViewProps {
 }
 
 const EMOJI_OPTIONS = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
-const MESSAGES_PER_PAGE = 30;
 
 export function ChatView({ conversationId: conversationIdProp, onBack, isMobile = false, channel = "dm", isActive = true }: ChatViewProps) {
   const { user } = useAuth();
@@ -974,195 +973,31 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
 
 
   const fetchMessages = async (loadMore = false) => {
-    if (!conversationId) return;
-    const epoch = conversationEpochRef.current;
-    // True when the user switched conversations (or a newer fetch cycle
-    // started) while this request was in flight. Stale requests must not
-    // touch messages, pagination, loading flags, or scroll position — the
-    // conversation-change effect owns resetting those now.
-    const isStale = () => epoch !== conversationEpochRef.current || activeConversationRef.current !== conversationId;
-
-    if (loadMore) {
-      if (loadingMoreRef.current || !hasMore || messagesRef.current.length === 0) return;
-      loadingMoreRef.current = true;
-      setLoadingMore(true);
-    }
-
-    const currentMessages = messagesRef.current;
-    const oldestMessage = loadMore && currentMessages.length > 0 ? currentMessages[0] : null;
-    
-    let query: any = (supabase as any)
-      .from(messagesTable)
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(MESSAGES_PER_PAGE);
-    if (isDM) query = query.eq("conversation_id", conversationIdProp);
-
-    if (oldestMessage) {
-      query = query.lt("created_at", oldestMessage.created_at);
-    }
-
-    const { data, error } = await query;
-
-    if (isStale()) return;
-
-    if (error) {
-      console.error("Error fetching messages:", error);
-      setLoadingMore(false);
-      loadingMoreRef.current = false;
-      return;
-    }
-
-    const messageIds = (data || []).map((m: any) => m.id);
-    const senderIds = [...new Set((data || []).map((m: any) => m.sender_id).filter((id: string | null) => id && id !== user?.id))] as string[];
-    const replyToIds = [...new Set((data || []).map((m: any) => m.reply_to_id).filter(Boolean))] as string[];
-
-    let messagesWithSenders: Message[] = [];
-    try {
-    // These reads are independent; issue them together instead of making each
-    // chat load wait through multiple database round trips in sequence.
-    const [reactionsMap, , profileResult, repliedResult] = await Promise.all([
-      fetchReactions(messageIds),
-      // Sign every media URL in the page with one batched request instead of
-      // one API call per message. Result is unused — it only warms the
-      // signChatUrl cache that signMessageMedia reads below.
-      prefetchChatUrls((data || []).flatMap((m: any) => collectMediaUrls(m.image_url))),
-      senderIds.length > 0
-        ? supabase
-          .from("profiles")
-          .select("id, username, display_name, avatar_url")
-          .in("id", senderIds)
-        : Promise.resolve({ data: [] }),
-      replyToIds.length > 0
-        ? (supabase as any)
-          .from(messagesTable)
-          .select("id, content, sender_id")
-          .in("id", replyToIds)
-        : Promise.resolve({ data: [] }),
-    ]);
-    const profiles = profileResult.data;
-    const profilesMap = new Map((profiles || []).map((p) => [p.id, p]));
-    const repliedMessages = repliedResult.data;
-
-    // Fetch sender profiles for replied messages
-    const replySenderIds = [...new Set(((repliedMessages || []) as any[]).map((m: any) => m.sender_id).filter((id: string | null) => id && id !== user?.id))] as string[];
-    const { data: replyProfiles } = replySenderIds.length > 0
-      ? await supabase
-          .from("profiles")
-          .select("id, username, display_name")
-          .in("id", replySenderIds)
-      : { data: [] };
-    
-    const replyProfilesMap = new Map((replyProfiles || []).map((p) => [p.id, p]));
-    const repliedMessagesMap = new Map(((repliedMessages || []) as any[]).map((m: any) => {
-      const sender = m.sender_id ? replyProfilesMap.get(m.sender_id) : undefined;
-      return [m.id, { ...m, sender }];
-    }));
-
-    messagesWithSenders = await Promise.all((data || []).map(async (msg: any) => {
-      const sender = msg.sender_id === user?.id ? ownSenderProfile : msg.sender_id ? profilesMap.get(msg.sender_id) : undefined;
-      const repliedMessage = msg.reply_to_id ? repliedMessagesMap.get(msg.reply_to_id) : undefined;
-      // A single unsigned/failed media URL must not fail the whole page.
-      const signedImageUrl = await signMessageMedia(msg.image_url).catch(() => msg.image_url);
-      return {
-        ...msg,
-        image_url: signedImageUrl,
-        sender: sender ? { username: sender.username, display_name: sender.display_name, avatar_url: sender.avatar_url } : undefined,
-        reactions: reactionsMap[msg.id] || [],
-        replied_message: repliedMessage ? {
-          ...repliedMessage,
-          sender: repliedMessage.sender_id === user?.id ? ownSenderProfile : repliedMessage.sender,
-        } : undefined,
-        _status: !showReceipts
-          ? ("sent" as const)
-          : msg.read_at
-            ? ("read" as const)
-            : (msg as any).delivered_at
-              ? ("delivered" as const)
-              : ("sent" as const),
-      };
-    }));
-    messagesWithSenders.reverse(); // ascending order
-    } catch (enrichError) {
-      // Enrichment (profiles/reactions/media signing) is best-effort: fall
-      // back to the raw fetched rows so a failure in an optimization can
-      // never keep message history from rendering. Sender names and media
-      // signing are still attempted per-message with their own guards.
-      console.error("Error enriching messages:", enrichError);
-      const fallbackSenderIds = [...new Set((data || []).map((m: any) => m.sender_id).filter((id: string | null) => id && id !== user?.id))] as string[];
-      let fallbackProfiles: Profile[] = [];
-      if (fallbackSenderIds.length) {
-        try {
-          const { data: rows } = await supabase
-            .from("profiles")
-            .select("id, username, display_name, avatar_url")
-            .in("id", fallbackSenderIds);
-          fallbackProfiles = (rows as Profile[]) || [];
-        } catch {
-          // Names are cosmetic; continue without them.
-        }
-      }
-      const fallbackProfilesMap = new Map(fallbackProfiles.map((p) => [p.id, p]));
-      messagesWithSenders = await Promise.all(((data || []) as any[]).slice().reverse().map(async (msg: any) => {
-        const sender = msg.sender_id === user?.id ? ownSenderProfile : msg.sender_id ? fallbackProfilesMap.get(msg.sender_id) : undefined;
-        const signedImageUrl = await signMessageMedia(msg.image_url).catch(() => msg.image_url);
-        return {
-          ...msg,
-          image_url: signedImageUrl,
-          sender: sender ? { username: sender.username, display_name: sender.display_name, avatar_url: sender.avatar_url } : undefined,
-          reactions: [],
-          replied_message: undefined,
-          _status: !showReceipts
-            ? ("sent" as const)
-            : msg.read_at
-              ? ("read" as const)
-              : (msg as any).delivered_at
-                ? ("delivered" as const)
-                : ("sent" as const),
-        } as Message;
-      }));
-    }
-
-    if (isStale()) return;
-
-    // Check if there are more messages — applied only after the staleness
-    // guard so a superseded request cannot clobber the new conversation's
-    // pagination state.
-    setHasMore((data || []).length === MESSAGES_PER_PAGE);
-
-    if (loadMore) {
-      // Preserve scroll position when loading older messages
-      const scrollArea = scrollAreaRef.current;
-      const scrollViewport = scrollArea?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
-      const previousScrollHeight = scrollViewport?.scrollHeight || 0;
-      const previousScrollTop = scrollViewport?.scrollTop || 0;
-
-      setMessages((prev) => {
-        if (isStale()) return prev;
-        return prependOlderMessages(prev, messagesWithSenders);
-      });
-
-      // Restore scroll position after new messages are added
-      requestAnimationFrame(() => {
-        if (isStale() || !scrollViewport) return;
-        const newScrollHeight = scrollViewport.scrollHeight;
-        scrollViewport.scrollTop = previousScrollTop + (newScrollHeight - previousScrollHeight);
-      });
-      setLoadingMore(false);
-      loadingMoreRef.current = false;
-    } else {
-      // Merge fetched page with whatever we already have (cache + realtime),
-      // so we don't drop older cached history or messages that arrived
-      // optimistically/via realtime while the fetch was in flight.
-      isInitialLoad.current = true;
-      initialScrollSettledRef.current = false;
-      userScrolledRef.current = false;
-      setMessages((prev) => {
-        if (isStale()) return prev;
-        return mergeMessagePage(prev, messagesWithSenders);
-      });
-    }
+    await fetchConversationMessages(loadMore, {
+      conversationId,
+      conversationEpochRef,
+      activeConversationRef,
+      isDM,
+      messagesTable,
+      conversationIdProp,
+      userId: user?.id,
+      ownSenderProfile,
+      showReceipts,
+      hasMore,
+      messagesRef,
+      setMessages,
+      setHasMore,
+      setLoadingMore,
+      loadingMoreRef,
+      isInitialLoad,
+      initialScrollSettledRef,
+      userScrolledRef,
+      scrollAreaRef,
+      fetchReactions,
+      supabase,
+    });
   };
+
 
   fetchMessagesRef.current = fetchMessages;
 

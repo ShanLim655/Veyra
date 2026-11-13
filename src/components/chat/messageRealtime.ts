@@ -151,6 +151,9 @@ export async function handleMessageRealtimePayload(
       if (!receiptTimerRef.current) {
         receiptTimerRef.current = setTimeout(() => {
           receiptTimerRef.current = null;
+          // The timer can outlive its conversation (scheduled just before a
+          // switch, fired after) — never refresh receipts for a stale one.
+          if (!isCurrent()) return;
           refreshReceiptStatuses();
         }, 100);
       }
@@ -160,6 +163,7 @@ export async function handleMessageRealtimePayload(
     if (!refreshTimerRef.current) {
       refreshTimerRef.current = setTimeout(() => {
         refreshTimerRef.current = null;
+        if (!isCurrent()) return;
         refetch();
       }, 60);
     }

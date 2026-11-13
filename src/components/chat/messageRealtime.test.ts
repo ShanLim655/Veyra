@@ -219,6 +219,68 @@ describe("handleMessageRealtimePayload — conversation guard", () => {
   });
 });
 
+describe("deferred refresh timers — conversation guard", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedSign.mockImplementation(async (value) => value);
+  });
+
+  it("does not refresh receipt statuses after the conversation switches", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = makeHarness({}, [makeMessage("m1")]);
+
+      // Schedule the receipt-refresh debounce while conv-a is active.
+      await handleMessageRealtimePayload(refreshUpdate("m1", ["read_at", "delivered_at"]), h.deps);
+      expect(h.deps.receiptTimerRef.current).not.toBeNull();
+
+      // Switch conversations before the 100ms timer fires.
+      h.setCurrent(false);
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(h.calls.receiptRefresh).toBe(0);
+      expect(h.deps.receiptTimerRef.current).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not refetch after the conversation switches", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = makeHarness({}, [makeMessage("m1")]);
+
+      // Schedule the general refresh debounce while conv-a is active.
+      await handleMessageRealtimePayload(refreshUpdate("m1", ["content"]), h.deps);
+      expect(h.deps.refreshTimerRef.current).not.toBeNull();
+
+      h.setCurrent(false);
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(h.calls.refetch).toBe(0);
+      expect(h.deps.refreshTimerRef.current).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still fires both debounced refreshes for the active conversation", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = makeHarness({}, [makeMessage("m1")]);
+
+      await handleMessageRealtimePayload(refreshUpdate("m1", ["content"]), h.deps);
+      await handleMessageRealtimePayload(refreshUpdate("m1", ["read_at", "delivered_at"]), h.deps);
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(h.calls.refetch).toBe(1);
+      expect(h.calls.receiptRefresh).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("handleMessageRealtimePayload — standard INSERT lifecycle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
