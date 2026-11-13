@@ -17,7 +17,7 @@
     "db:grant-role": "node server/grant-role.mjs",
     "queue:worker": "node scripts/altare-queue-worker.mjs",
     "db:import:legacy": "node server/import-postgres.mjs",
-    "test": "node --test server/encryption.test.mjs server/redis.test.mjs",
+    "test": "node --test server/encryption.test.mjs server/redis.test.mjs && vitest run",
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
@@ -111,7 +111,8 @@
     "tailwindcss": "^3.4.17",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.38.0",
-    "vite": "^5.4.19"
+    "vite": "^5.4.19",
+    "vitest": "~3.2.4"
   },
   "build": {
     "appId": "chat.veyra.desktop",
