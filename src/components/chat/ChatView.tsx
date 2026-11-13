@@ -75,6 +75,7 @@ import { BarChart3, Users as UsersIcon, Settings as SettingsIcon } from "lucide-
 import { isStatusActive } from "@/lib/customStatus";
 import { GroupAvatar } from "@/components/chat/GroupAvatar";
 import { GroupSettingsDialog } from "@/components/chat/GroupSettingsDialog";
+import { handleMessageRealtimePayload, handleReactionRealtimePayload } from "./messageRealtime";
 
 
 
@@ -87,14 +88,14 @@ async function uploadChatMedia(bucket: "chat-images" | "chat-videos" | "chat-voi
   if (error) throw error;
   return signed.publicUrl;
 }
-interface Reaction {
+export interface Reaction {
   id: string;
   emoji: string;
   user_id: string;
   message_id: string;
 }
 
-interface Message {
+export interface Message {
   id: string;
   content: string;
   sender_id: string | null;
@@ -134,16 +135,6 @@ interface Profile {
   custom_status_emoji?: string | null;
   custom_status_expires_at?: string | null;
 }
-
-type MariaDbRefreshPayload = {
-  refresh?: boolean;
-  table?: string;
-  eventType?: string;
-  actor_id?: string;
-  keys?: Record<string, string | number>;
-  columns?: string[];
-  record?: Record<string, unknown>;
-};
 
 type AttachmentKind = 'image' | 'video' | 'music' | 'file';
 
@@ -634,186 +625,42 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       const subFilter = isDM
         ? { event: "*" as const, schema: "public", table: messagesTable, filter: `conversation_id=eq.${conversationIdProp}` }
         : { event: "*" as const, schema: "public", table: messagesTable };
+      const messageRealtimeDeps = {
+        isCurrent: () => activeConversationRef.current === conversationId,
+        userId: user?.id,
+        ownSenderProfile,
+        messagesTable,
+        isAnnouncements,
+        isActive,
+        showReceipts,
+        messagesRef,
+        setMessages,
+        reconcileLiveMessage,
+        refreshReceiptStatuses,
+        refreshTimerRef: realtimeRefreshTimerRef,
+        receiptTimerRef: receiptRefreshTimerRef,
+        refetch: () => { void fetchMessagesRef.current?.(); },
+        scrollAreaRef,
+        scrollToBottom,
+        supabase,
+      };
       const channel = supabase
         .channel(`${messagesTable}:${conversationId}`)
         .on(
           "postgres_changes",
           subFilter as any,
-          async (payload) => {
-            const change = payload as unknown as MariaDbRefreshPayload;
-            if (change.refresh) {
-              if (change.eventType === 'DELETE' && change.keys?.id) {
-                setMessages((previous) => previous.filter((message) => message.id !== change.keys.id));
-                return;
-              }
-
-              if (change.keys?.id && change.eventType !== 'INSERT'
-                && !messagesRef.current.some((message) => message.id === change.keys.id)) return;
-
-              if (change.eventType === 'INSERT' && change.record?.id && change.table === messagesTable) {
-                const received = {
-                  ...change.record,
-                  sender: (change.record.sender as Message['sender'] | undefined)
-                    || (change.record.sender_id === user?.id ? ownSenderProfile : undefined),
-                  reactions: [],
-                  _status: 'sent' as const,
-                } as Message;
-                reconcileLiveMessage(received);
-                void Promise.all([
-                  received.sender_id
-                    ? received.sender_id === user?.id
-                      ? Promise.resolve({ data: ownSenderProfile })
-                      : supabase.from('profiles').select('username, display_name, avatar_url').eq('id', received.sender_id).single()
-                    : Promise.resolve({ data: null }),
-                  received.reply_to_id
-                    ? (supabase as any).from(messagesTable).select('id, content, sender_id').eq('id', received.reply_to_id).maybeSingle()
-                    : Promise.resolve({ data: null }),
-                  signMessageMedia(received.image_url).catch(() => received.image_url),
-                ]).then(async ([senderResult, replyResult, signedImageUrl]) => {
-                  // The user may have switched conversations while enrichment
-                  // was in flight — never merge into the new conversation's state.
-                  if (activeConversationRef.current !== conversationId) return;
-                  let repliedMessage: Message['replied_message'];
-                  if (replyResult.data) {
-                    const replySenderResult = replyResult.data.sender_id
-                      ? await supabase.from('profiles').select('username, display_name').eq('id', replyResult.data.sender_id).single()
-                      : { data: null };
-                    repliedMessage = { ...replyResult.data, sender: replySenderResult.data || undefined };
-                  }
-                  if (activeConversationRef.current !== conversationId) return;
-                  setMessages((previous) => previous.map((message) => message.id === received.id
-                    ? {
-                      ...message,
-                      image_url: signedImageUrl,
-                      sender: senderResult.data || received.sender,
-                      replied_message: repliedMessage,
-                    }
-                    : message));
-                }).catch((error) => console.warn('Could not enrich live message:', error));
-                const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
-                if (viewport && viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 250) {
-                  setTimeout(() => {
-                    if (activeConversationRef.current !== conversationId) return;
-                    scrollToBottom('smooth');
-                  }, 60);
-                }
-                return;
-              }
-
-              const columns = change.columns as string[] | undefined;
-              const receiptOnly = change.table === 'messages'
-                && change.eventType === 'UPDATE'
-                && columns?.length
-                && columns.every((column) => column === 'read_at' || column === 'delivered_at');
-              if (receiptOnly) {
-                if (!receiptRefreshTimerRef.current) {
-                  receiptRefreshTimerRef.current = setTimeout(() => {
-                    receiptRefreshTimerRef.current = null;
-                    void refreshReceiptStatuses();
-                  }, 100);
-                }
-                return;
-              }
-
-              if (!realtimeRefreshTimerRef.current) {
-                realtimeRefreshTimerRef.current = setTimeout(() => {
-                  realtimeRefreshTimerRef.current = null;
-                  void fetchMessagesRef.current?.();
-                }, 60);
-              }
-              return;
-            }
-            if (payload.eventType === "INSERT") {
-              const newMsg = payload.new as Message;
-              if (newMsg.sender_id) {
-                if (newMsg.sender_id === user?.id) {
-                  newMsg.sender = ownSenderProfile;
-                } else {
-                  const { data: sender } = await supabase
-                    .from("profiles")
-                    .select("username, display_name, avatar_url")
-                    .eq("id", newMsg.sender_id)
-                    .single();
-                  newMsg.sender = sender || undefined;
-                }
-              }
-              // Fetch replied message data if exists
-              if (newMsg.reply_to_id) {
-                const { data: repliedMsg } = await (supabase as any)
-                  .from(messagesTable)
-                  .select("id, content, sender_id")
-                  .eq("id", newMsg.reply_to_id)
-                  .maybeSingle();
-                if (repliedMsg) {
-                  const { data: replySender } = repliedMsg.sender_id
-                    ? await supabase
-                        .from("profiles")
-                        .select("username, display_name")
-                        .eq("id", repliedMsg.sender_id)
-                        .single()
-                    : { data: null };
-                  newMsg.replied_message = {
-                    ...repliedMsg,
-                    sender: replySender || undefined,
-                  };
-                }
-              }
-              newMsg.reactions = [];
-              const rawImageUrl = newMsg.image_url || null;
-              // Signing is best-effort — a failure must not drop the live message.
-              newMsg.image_url = await signMessageMedia(newMsg.image_url).catch(() => newMsg.image_url);
-              // The sender/reply/signing lookups above are async — the user may
-              // have switched conversations meanwhile. Never merge this message
-              // into a different conversation's state.
-              if (activeConversationRef.current !== conversationId) return;
-              reconcileLiveMessage({ ...newMsg, _status: "sent" }, rawImageUrl);
-              // Scroll to bottom only if user is already near the bottom
-              setTimeout(() => {
-                if (activeConversationRef.current !== conversationId) return;
-                const v = scrollAreaRef.current?.querySelector(
-                  "[data-radix-scroll-area-viewport]",
-                ) as HTMLElement | null;
-                if (!v) return;
-                const nearBottom = v.scrollHeight - v.scrollTop - v.clientHeight < 250;
-                const isOwn = newMsg.sender_id === user?.id;
-                if (nearBottom || isOwn) scrollToBottom("smooth");
-              }, 100);
-
-              if (isAnnouncements && isActive && user?.id) {
-                void markAnnouncementsRead(user.id)
-                  .then(() => window.dispatchEvent(new CustomEvent("announcements-read")))
-                  .catch((error) => console.error("Error marking announcements as read:", error));
-              }
-            } else if (payload.eventType === "UPDATE") {
-              const updatedMsg = payload.new as Message;
-              setMessages((prev) =>
-                prev.map((m) => {
-                  if (m.id === updatedMsg.id) {
-                    const newStatus = !showReceipts
-                      ? m._status
-                      : updatedMsg.read_at
-                      ? ("read" as const)
-                      : updatedMsg.delivered_at
-                        ? ("delivered" as const)
-                        : (m._status === "sending" ? "sent" as const : m._status);
-                    return {
-                      ...m,
-                      ...updatedMsg,
-                      reactions: m.reactions,
-                      _status: newStatus,
-                    };
-                  }
-                  return m;
-                })
-              );
-            } else if (payload.eventType === "DELETE") {
-              const deletedMsg = payload.old as Message;
-              setMessages((prev) => prev.filter((m) => m.id !== deletedMsg.id));
-            }
+          (payload) => {
+            void handleMessageRealtimePayload(payload, messageRealtimeDeps);
           }
         )
         .subscribe();
 
+      const reactionRealtimeDeps = {
+        isCurrent: () => activeConversationRef.current === conversationId,
+        messagesRef,
+        setMessages,
+        fetchReactions,
+      };
       const reactionsChannel = supabase
         .channel(`reactions:${conversationId}`)
         .on(
@@ -824,46 +671,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
             table: "message_reactions",
           },
           (payload) => {
-            const change = payload as unknown as MariaDbRefreshPayload;
-            if (change.refresh) {
-              const messageIds = messagesRef.current.map((message) => message.id);
-              void fetchReactions(messageIds).then((reactionMap) => {
-                // The fetch is async — bail if the conversation changed so a
-                // stale reaction map cannot wipe the new conversation's
-                // reactions (every id would miss and reset to []).
-                if (activeConversationRef.current !== conversationId) return;
-                setMessages((previous) => previous.map((message) => ({
-                  ...message,
-                  reactions: reactionMap[message.id] || [],
-                })));
-              });
-              return;
-            }
-            if (payload.eventType === "INSERT") {
-              const newReaction = payload.new as Reaction;
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === newReaction.message_id
-                    ? { 
-                        ...m, 
-                        reactions: [...(m.reactions || []).filter(r => r.id !== newReaction.id), newReaction] 
-                      }
-                    : m
-                )
-              );
-            } else if (payload.eventType === "DELETE") {
-              const deletedReaction = payload.old as Reaction;
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === deletedReaction.message_id
-                    ? {
-                        ...m,
-                        reactions: (m.reactions || []).filter((r) => r.id !== deletedReaction.id),
-                      }
-                    : m
-                )
-              );
-            }
+            handleReactionRealtimePayload(payload, reactionRealtimeDeps);
           }
         )
         .subscribe();
