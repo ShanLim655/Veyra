@@ -24,11 +24,12 @@ describe("prependOlderMessages", () => {
   });
 
   it("keeps the existing copy when ids collide so realtime state wins", () => {
-    const live = { ...msg("b", "2026-01-01T00:00:02Z"), _status: "read" as const };
-    const stale = { ...msg("b", "2026-01-01T00:00:02Z"), _status: "sent" as const };
-    const merged = prependOlderMessages([live], [stale]);
+    type Row = { id: string; created_at: string; _status?: string };
+    const live: Row = { ...msg("b", "2026-01-01T00:00:02Z"), _status: "read" };
+    const stale: Row = { ...msg("b", "2026-01-01T00:00:02Z"), _status: "sent" };
+    const merged = prependOlderMessages<Row>([live], [stale]);
     expect(merged).toHaveLength(1);
-    expect((merged[0] as any)._status).toBe("read");
+    expect(merged[0]._status).toBe("read");
   });
 
   it("handles an empty previous list and an empty page", () => {
