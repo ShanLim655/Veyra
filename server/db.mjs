@@ -266,17 +266,35 @@ async function runPg(client, sql, params) {
 
 function createPgPool() {
   const pgPool = new pg.Pool(pgConfig());
-  pgPool.on('connect', (client) => {
-    // Belt-and-suspenders for hosts that ignore startup `options`.
-    client.query('SET TIME ZONE \'UTC\'').catch(() => {});
-  });
   pgPool.on('error', (error) => console.error('PostgreSQL pool error:', error.message));
 
-  const query = (sql, params) => runPg(pgPool, sql, params);
+  // Pin each physical connection's timezone to UTC. The startup `options`
+  // parameter already does this; the awaited SET is a fallback for hosts that
+  // ignore it. It must be awaited on first checkout — firing it un-awaited
+  // from the pool 'connect' event triggers pg's "client already executing a
+  // query" deprecation and can interleave with the caller's first real query.
+  const utcInitialized = new WeakSet();
+  const acquireClient = async () => {
+    const client = await pgPool.connect();
+    if (!utcInitialized.has(client)) {
+      await client.query("SET TIME ZONE 'UTC'").catch(() => {});
+      utcInitialized.add(client);
+    }
+    return client;
+  };
+
+  const query = async (sql, params) => {
+    const client = await acquireClient();
+    try {
+      return await runPg(client, sql, params);
+    } finally {
+      client.release();
+    }
+  };
   const execute = query;
 
   const getConnection = async () => {
-    const client = await pgPool.connect();
+    const client = await acquireClient();
     return {
       query: (sql, params) => runPg(client, sql, params),
       execute: (sql, params) => runPg(client, sql, params),
