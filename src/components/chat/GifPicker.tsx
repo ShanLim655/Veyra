@@ -89,6 +89,13 @@ export function GifPicker({ onSelect, className }: GifPickerProps) {
     return () => clearTimeout(timer);
   }, [query]);
 
+  // A pending long-press timer must not fire (or leave `fired` set) after the
+  // user switches tabs — clear it whenever the visible tab changes.
+  useEffect(() => {
+    clearLongPress();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+
   const visibleGifs = searching || tab === "trending" ? gifs : favorites;
   // Favorites render from localStorage — no fetch, so never show a spinner.
   const showLoading = (searching || tab === "trending") && loading && visibleGifs.length === 0;
@@ -98,11 +105,13 @@ export function GifPicker({ onSelect, className }: GifPickerProps) {
       clearTimeout(longPressRef.current.timer);
       longPressRef.current.timer = null;
     }
-    longPressRef.current.fired = false;
+    // NOTE: do not reset `fired` here — touchend runs before click, and the
+    // click handler needs the flag to suppress the select after a long-press.
   };
 
   const startLongPress = (gif: GifItem) => {
     clearLongPress();
+    longPressRef.current.fired = false;
     longPressRef.current.timer = setTimeout(() => {
       longPressRef.current.fired = true;
       toggleFavoriteGif(gif);

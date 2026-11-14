@@ -139,7 +139,6 @@ async function policy(table, userId, operation) {
     const extra = table === 'poll_options' && operation !== 'select' ? ' AND p.created_by = ?' : '';
     return { sql: `EXISTS (SELECT 1 FROM polls p WHERE p.id = t.poll_id AND (p.conversation_id IS NULL OR EXISTS (SELECT 1 FROM conversation_members cm WHERE cm.conversation_id = p.conversation_id AND cm.user_id = ?))${extra})`, args: extra ? [userId, userId] : [userId] };
   }
-  if (table === 'announcement_messages') return { sql: '1 = 1', args: [] };
   if (table === 'friend_requests') return { sql: '(sender_id = ? OR receiver_id = ?)', args: [userId, userId] };
   if (owner[table]) {
     const cols = owner[table];

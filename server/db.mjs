@@ -15,7 +15,11 @@ export const dialect = String(process.env.USE_MARIADB ?? 'true').trim().toLowerC
   : 'mariadb';
 export const isPostgres = dialect === 'postgres';
 
-const configuredPoolSize = Number(process.env.MARIADB_POOL_SIZE || process.env.POSTGRES_POOL_SIZE || 1);
+const configuredPoolSize = Number(
+  isPostgres
+    ? process.env.POSTGRES_POOL_SIZE || process.env.MARIADB_POOL_SIZE || 1
+    : process.env.MARIADB_POOL_SIZE || process.env.POSTGRES_POOL_SIZE || 1,
+);
 // Vercel creates multiple warm function instances. Keep each instance's
 // connection footprint deliberately small for Layerbase's 20-client Free cap.
 const connectionLimit = Number.isFinite(configuredPoolSize)

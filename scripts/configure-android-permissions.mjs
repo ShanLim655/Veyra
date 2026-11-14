@@ -10,17 +10,35 @@ const REQUIRED_PERMISSIONS = [
   'android.permission.MODIFY_AUDIO_SETTINGS',
 ];
 
-let manifest = await readFile(manifestPath, 'utf8');
+const original = await readFile(manifestPath, 'utf8');
+let manifest = original;
+const changes = [];
+
+// Keep app data (including the stored session token) out of Android cloud
+// backups — a backed-up token would let anyone restore a signed-in session.
+// The Capacitor template ships allowBackup="true", so force it off.
+if (/android:allowBackup="true"/.test(manifest)) {
+  manifest = manifest.replace('android:allowBackup="true"', 'android:allowBackup="false"');
+  changes.push('android:allowBackup="false"');
+} else if (!/android:allowBackup="false"/.test(manifest)) {
+  manifest = manifest.replace('<application', '<application android:allowBackup="false" android:fullBackupContent="false"');
+  changes.push('android:allowBackup="false"');
+}
+
 const missing = REQUIRED_PERMISSIONS.filter(
   (permission) => !manifest.includes(`android:name="${permission}"`),
 );
-if (!missing.length) {
-  console.log('Android permissions already configured.');
-} else {
+if (missing.length) {
   const insert = missing.map((permission) => `    <uses-permission android:name="${permission}" />`).join('\n');
   const anchor = manifest.match(/<uses-permission[^>]*\/>/);
   if (!anchor) throw new Error(`Could not find a uses-permission element in ${manifestPath}.`);
   manifest = manifest.replace(anchor[0], `${anchor[0]}\n${insert}`);
+  changes.push(...missing);
+}
+
+if (manifest !== original) {
   await writeFile(manifestPath, manifest);
-  console.log(`Added Android permissions: ${missing.join(', ')}.`);
+  console.log(`Android manifest updated: ${changes.join(', ')}.`);
+} else {
+  console.log('Android manifest already configured.');
 }

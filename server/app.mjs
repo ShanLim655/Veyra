@@ -65,7 +65,10 @@ export function createApp() {
   // Public release-metadata proxy. Clients (Android WebView, desktop, web)
   // cannot always fetch GitHub release downloads directly — redirects to asset
   // hosts break CORS — so the API fetches latest.json server-side and caches it.
-  const RELEASE_METADATA_URL = 'https://github.com/ShanLim655/Veyra/releases/latest/download/latest.json';
+  // Configurable so forks/renames don't need a code change; falls back to the
+  // canonical repo's latest.json.
+  const RELEASE_METADATA_URL = process.env.RELEASE_METADATA_URL
+    || `https://github.com/${process.env.GITHUB_REPOSITORY || 'ShanLim655/Veyra'}/releases/latest/download/latest.json`;
   let releaseCache = { at: 0, body: null };
   app.get('/api/app-version', async (_req, res) => {
     try {

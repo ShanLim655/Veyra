@@ -5,6 +5,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
+const crypto = require('node:crypto');
 
 const APP_URL = 'https://veyra-pink-mu.vercel.app';
 const APP_ORIGIN = new URL(APP_URL).origin;
@@ -91,7 +92,8 @@ ipcMain.handle('veyra:open-external', async (_event, target) => {
 });
 
 function compareVersions(left, right) {
-  const parse = (value) => String(value).replace(/^v/, '').split('.').map((part) => Number.parseInt(part, 10));
+  // Leading digits only, so '1.2.3-beta' compares as 1.2.3.
+  const parse = (value) => String(value).replace(/^v/, '').split('.').map((part) => Number.parseInt(String(part).match(/^\d+/)?.[0] ?? '', 10));
   const a = parse(left); const b = parse(right);
   if (a.length !== 3 || b.length !== 3 || [...a, ...b].some((part) => !Number.isInteger(part) || part < 0)) return 0;
   for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i] ? 1 : -1;
@@ -168,6 +170,16 @@ async function runDownload(release) {
         percent: total > 0 ? Math.min(100, Math.round((received / total) * 100)) : null,
       });
     });
+    // When the release metadata carries a sha256 checksum, verify the
+    // downloaded installer before offering to run it.
+    const expectedHash = String(release.windows.sha256 || '').trim().toLowerCase();
+    if (expectedHash) {
+      const actualHash = crypto.createHash('sha256').update(fs.readFileSync(installer)).digest('hex');
+      if (actualHash !== expectedHash) {
+        try { fs.unlinkSync(installer); } catch {}
+        throw new Error('The downloaded update failed its integrity check. Please try again.');
+      }
+    }
     // Re-open the update window if the user dismissed it mid-download so the
     // "Restart to update" prompt is never silently lost.
     ensureUpdateWindow();

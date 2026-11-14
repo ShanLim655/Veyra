@@ -40,7 +40,11 @@ async function installedVersion() {
 }
 
 function compareVersions(left: string, right: string) {
-  const parse = (value: string) => normalizeVersion(value).split('.').map((part) => Number(part));
+  // Extract the leading digits of each part so pre-release/build suffixes
+  // ('1.2.3-beta', '1.2.3+build') still compare numerically.
+  const parse = (value: string) => normalizeVersion(value)
+    .split('.')
+    .map((part) => Number(part.match(/^\d+/)?.[0] ?? NaN));
   const a = parse(left); const b = parse(right);
   const length = Math.max(a.length, b.length, 3);
   if (a.length > 4 || b.length > 4 || [...a, ...b].some((part) => !Number.isInteger(part) || part < 0)) return 0;

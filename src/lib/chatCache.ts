@@ -61,17 +61,44 @@ function read<T>(key: string): T | null {
   }
 }
 
+function evictOldestEntries(count: number): void {
+  try {
+    const entries: Array<{ key: string; t: number }> = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(PREFIX)) continue;
+      try {
+        const parsed = JSON.parse(localStorage.getItem(k) || "{}") as Envelope<unknown>;
+        entries.push({ key: k, t: typeof parsed.t === "number" ? parsed.t : 0 });
+      } catch {
+        entries.push({ key: k, t: 0 });
+      }
+    }
+    entries.sort((a, b) => a.t - b.t);
+    for (const entry of entries.slice(0, count)) localStorage.removeItem(entry.key);
+  } catch {
+    /* ignore */
+  }
+}
+
 function write<T>(key: string, value: T): void {
   purgeLegacy();
+  const env: Envelope<T> = { t: Date.now(), k: key, v: value };
+  const serialized = JSON.stringify(env);
   try {
-    const env: Envelope<T> = { t: Date.now(), k: key, v: value };
-    localStorage.setItem(PREFIX + key, JSON.stringify(env));
+    localStorage.setItem(PREFIX + key, serialized);
   } catch {
-    // Quota or serialization failure — drop the slot rather than crashing.
+    // Quota exceeded — evict the oldest cache entries and retry once before
+    // giving up, so a full cache doesn't silently drop fresh writes.
     try {
-      localStorage.removeItem(PREFIX + key);
+      evictOldestEntries(10);
+      localStorage.setItem(PREFIX + key, serialized);
     } catch {
-      /* ignore */
+      try {
+        localStorage.removeItem(PREFIX + key);
+      } catch {
+        /* ignore */
+      }
     }
   }
 }

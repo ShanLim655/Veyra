@@ -418,7 +418,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     // leak into the new one's header.
     if (activeConversationRef.current !== targetConversation) return;
     setPinnedMessages(pinnedWithSenders as Message[]);
-  }, [conversationIdProp, isDM, supportsPinning, messagesTable]);
+  }, [conversationIdProp, isDM, supportsPinning, messagesTable, user?.id, ownSenderProfile]);
 
   const togglePin = async (message: Message) => {
     if (!supportsPinning) return;
