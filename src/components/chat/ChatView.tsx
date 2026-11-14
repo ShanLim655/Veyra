@@ -68,6 +68,8 @@ import { ChatSearch } from "@/components/chat/ChatSearch";
 import { messageMentionsMe } from "@/lib/mentions";
 import { LazyFullEmojiPicker as EmojiPickerPanel } from "@/components/chat/LazyFullEmojiPicker";
 import { MentionAutocomplete, type MentionCandidate } from "@/components/chat/MentionAutocomplete";
+import { GifPicker } from "@/components/chat/GifPicker";
+import type { GifItem } from "@/lib/giphy";
 import { PollCard, PollResultCard } from "@/components/chat/PollCard";
 import { CreatePollDialog } from "@/components/chat/CreatePollDialog";
 import { BarChart3, Users as UsersIcon, Settings as SettingsIcon } from "lucide-react";
@@ -261,6 +263,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   const [deleteMessageId, setDeleteMessageId] = useState<string | null>(null);
   const [uploadingMedia, setUploadingMedia] = useState(false);
   const [mediaPreviews, setMediaPreviews] = useState<MediaPreview[]>([]);
+  const [gifPickerOpen, setGifPickerOpen] = useState(false);
   
   const [videoLightboxUrl, setVideoLightboxUrl] = useState<string | null>(null);
   const [openEmojiPopover, setOpenEmojiPopover] = useState<string | null>(null);
@@ -1003,21 +1006,17 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     }, 2000);
   }, [setTyping, isDM]);
 
-  const sendMessage = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const dispatchMessage = async (
+    contentToSend: string,
+    previewsToSend: MediaPreview[],
+    replyTarget: Message | null,
+  ) => {
     if (!conversationId || !user) return;
     if (!canPost) return;
-    const hasText = newMessage.trim().length > 0;
-    const hasMedia = mediaPreviews.length > 0;
-    if (!hasText && !hasMedia) return;
 
     setLoading(true);
     if (isDM) setTyping(false);
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-
-    const contentToSend = newMessage.trim();
-    const previewsToSend = mediaPreviews;
-    const replyTarget = replyingTo;
 
     setNewMessage("");
     setReplyingTo(null);
@@ -1153,6 +1152,41 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       });
     }
     setLoading(false);
+  };
+
+  const sendMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const hasText = newMessage.trim().length > 0;
+    const hasMedia = mediaPreviews.length > 0;
+    if (!hasText && !hasMedia) return;
+    await dispatchMessage(newMessage.trim(), mediaPreviews, replyingTo);
+  };
+
+  const handleGifSelect = async (gif: GifItem) => {
+    setGifPickerOpen(false);
+    if (!conversationId || !user || !canPost) return;
+    const contentToSend = newMessage.trim();
+    const replyTarget = replyingTo;
+    try {
+      const response = await fetch(gif.sendUrl);
+      if (!response.ok) throw new Error(`Download failed (${response.status}).`);
+      const blob = await response.blob();
+      const file = new File([blob], `${gif.id}.gif`, {
+        type: blob.type.startsWith("image/") ? blob.type : "image/gif",
+      });
+      const preview: MediaPreview = {
+        file,
+        url: URL.createObjectURL(file),
+        type: "image",
+      };
+      await dispatchMessage(contentToSend, [preview], replyTarget);
+    } catch (error) {
+      toast({
+        title: "Could not send GIF",
+        description: error instanceof Error ? error.message : "Try again.",
+        variant: "destructive",
+      });
+    }
   };
 
   const addFilesToPreview = (files: File[]) => {
@@ -2457,6 +2491,29 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                 <Paperclip className="h-4 w-4" />
               )}
             </Button>
+            {canPost && (
+              <Popover open={gifPickerOpen} onOpenChange={setGifPickerOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    title="Send a GIF"
+                    disabled={uploadingMedia || uploadingVoice}
+                    className="px-2"
+                  >
+                    <span className="text-[10px] font-bold tracking-wide">GIF</span>
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent
+                  className="w-auto border-border p-0"
+                  side="top"
+                  align="start"
+                >
+                  <GifPicker onSelect={handleGifSelect} />
+                </PopoverContent>
+              </Popover>
+            )}
             {canPost && (
               <CreatePollDialog
                 channel={isDM ? "dm" : isAnnouncements ? "announcement" : "global"}
