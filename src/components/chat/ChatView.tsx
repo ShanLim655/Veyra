@@ -51,7 +51,7 @@ import {
   Trash2, Smile, ArrowLeft, ImagePlus, ArrowDown, Reply,
   ChevronLeft, ChevronRight, Play, Mic, Pin, Copy
 } from "lucide-react";
-import { Sheet, SheetContent } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { signMessageMedia, encodeFile, decodeFile, encodeMusic, decodeMusic } from "@/lib/mediaUrl";
 import { compressImageForUpload } from "@/lib/imageCompress";
 import { getCachedMessages, setCachedMessages } from "@/lib/chatCache";
@@ -68,6 +68,9 @@ import { ChatSearch } from "@/components/chat/ChatSearch";
 import { messageMentionsMe } from "@/lib/mentions";
 import { LazyFullEmojiPicker as EmojiPickerPanel } from "@/components/chat/LazyFullEmojiPicker";
 import { MentionAutocomplete, type MentionCandidate } from "@/components/chat/MentionAutocomplete";
+import { GifPicker } from "@/components/chat/GifPicker";
+import type { GifItem } from "@/lib/giphy";
+import { sendGifMessage } from "@/lib/gifSend";
 import { PollCard, PollResultCard } from "@/components/chat/PollCard";
 import { CreatePollDialog } from "@/components/chat/CreatePollDialog";
 import { BarChart3, Users as UsersIcon, Settings as SettingsIcon } from "lucide-react";
@@ -261,6 +264,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
   const [deleteMessageId, setDeleteMessageId] = useState<string | null>(null);
   const [uploadingMedia, setUploadingMedia] = useState(false);
   const [mediaPreviews, setMediaPreviews] = useState<MediaPreview[]>([]);
+  const [gifPickerOpen, setGifPickerOpen] = useState(false);
   
   const [videoLightboxUrl, setVideoLightboxUrl] = useState<string | null>(null);
   const [openEmojiPopover, setOpenEmojiPopover] = useState<string | null>(null);
@@ -1003,21 +1007,17 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     }, 2000);
   }, [setTyping, isDM]);
 
-  const sendMessage = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const dispatchMessage = async (
+    contentToSend: string,
+    previewsToSend: MediaPreview[],
+    replyTarget: Message | null,
+  ) => {
     if (!conversationId || !user) return;
     if (!canPost) return;
-    const hasText = newMessage.trim().length > 0;
-    const hasMedia = mediaPreviews.length > 0;
-    if (!hasText && !hasMedia) return;
 
     setLoading(true);
     if (isDM) setTyping(false);
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-
-    const contentToSend = newMessage.trim();
-    const previewsToSend = mediaPreviews;
-    const replyTarget = replyingTo;
 
     setNewMessage("");
     setReplyingTo(null);
@@ -1058,7 +1058,6 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
               mime: preview.file.type || "application/octet-stream",
             }));
           }
-          URL.revokeObjectURL(preview.url);
         }
         imageUrlJson = JSON.stringify(urls);
       } catch (error: any) {
@@ -1066,9 +1065,13 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
         setUploadingMedia(false);
         setLoading(false);
         // Restore composer state so user doesn't lose their work
-        setNewMessage(contentToSend);
-        setMediaPreviews(previewsToSend);
-        if (replyTarget) setReplyingTo(replyTarget);
+        if (activeConversationRef.current === conversationId) {
+          setNewMessage(contentToSend);
+          setMediaPreviews(previewsToSend);
+          if (replyTarget) setReplyingTo(replyTarget);
+        } else {
+          previewsToSend.forEach((preview) => URL.revokeObjectURL(preview.url));
+        }
         return;
       } finally {
         setUploadingMedia(false);
@@ -1133,6 +1136,13 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       pendingOutgoingMessagesRef.current.delete(tempId);
       console.error("Error sending message:", error);
       toast({ title: "Error sending message", description: error.message, variant: "destructive" });
+      if (stillActive) {
+        setNewMessage(contentToSend);
+        setMediaPreviews(previewsToSend);
+        if (replyTarget) setReplyingTo(replyTarget);
+      } else {
+        previewsToSend.forEach((preview) => URL.revokeObjectURL(preview.url));
+      }
       setMessages((prev) => prev.some((message) => message.id === tempId)
         ? prev.filter((message) => message.id !== tempId)
         : prev);
@@ -1151,11 +1161,49 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
         };
         return next;
       });
+      previewsToSend.forEach((preview) => URL.revokeObjectURL(preview.url));
     }
     setLoading(false);
   };
 
+  const sendMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (uploadingMedia) return;
+    const hasText = newMessage.trim().length > 0;
+    const hasMedia = mediaPreviews.length > 0;
+    if (!hasText && !hasMedia) return;
+    await dispatchMessage(newMessage.trim(), mediaPreviews, replyingTo);
+  };
+
+  const handleGifSelect = (gif: GifItem) => {
+    setGifPickerOpen(false);
+    setMentionState(null);
+    if (!conversationId || !user || !canPost) return;
+    void sendGifMessage(gif, {
+      state: {
+        content: newMessage.trim(),
+        previews: mediaPreviews,
+        reply: replyingTo,
+      },
+      isBusy: () => uploadingMedia,
+      setBusy: setUploadingMedia,
+      dispatch: dispatchMessage,
+      onError: (error) =>
+        toast({
+          title: "Could not send GIF",
+          description: error instanceof Error ? error.message : "Try again.",
+          variant: "destructive",
+        }),
+      createPreview: (file) => ({
+        file,
+        url: URL.createObjectURL(file),
+        type: "image",
+      }),
+    });
+  };
+
   const addFilesToPreview = (files: File[]) => {
+    if (uploadingMedia) return;
     const validFiles: MediaPreview[] = [];
     for (const file of files) {
       // Reject folders: zero-size with no type, or names ending in /
@@ -1216,6 +1264,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
 
 
   const removePreview = (index: number) => {
+    if (uploadingMedia) return;
     setMediaPreviews((prev) => {
       const target = prev[index];
       if (target) URL.revokeObjectURL(target.url);
@@ -1872,7 +1921,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                         bg.style.transition = 'opacity 0.25s ease';
                         bg.style.opacity = '0';
                       }
-                      if (swipe.active && e.changedTouches[0]) {
+                      if (swipe.active && e.changedTouches[0] && !uploadingMedia) {
                         const endX = e.changedTouches[0].clientX;
                         if (endX - swipe.startX > 80) {
                           setReplyingTo(message);
@@ -2222,6 +2271,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                           variant="ghost"
                           className="h-7 w-7"
                           onClick={() => setReplyingTo(message)}
+                          disabled={uploadingMedia}
                           title="Reply"
                         >
                           <Reply className="h-4 w-4" />
@@ -2353,6 +2403,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
               variant="ghost"
               className="h-6 w-6 flex-shrink-0"
               onClick={() => setReplyingTo(null)}
+              disabled={uploadingMedia}
             >
               <X className="h-4 w-4" />
             </Button>
@@ -2428,7 +2479,8 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                     key={preset}
                     type="button"
                     onClick={() => setNewMessage(preset)}
-                    className="text-xs px-3 py-1.5 rounded-full bg-muted hover:bg-muted/70 border border-border transition-colors"
+                    disabled={uploadingMedia}
+                    className="text-xs px-3 py-1.5 rounded-full bg-muted hover:bg-muted/70 border border-border transition-colors disabled:opacity-50 disabled:pointer-events-none"
                   >
                     {preset}
                   </button>
@@ -2457,7 +2509,51 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                 <Paperclip className="h-4 w-4" />
               )}
             </Button>
-            {canPost && (
+            {canPost && (isMobile ? (
+              <Sheet open={gifPickerOpen} onOpenChange={setGifPickerOpen}>
+                <SheetTrigger asChild>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    title="Send a GIF"
+                    disabled={uploadingMedia || uploadingVoice}
+                    className="px-2"
+                  >
+                    <span className="text-[10px] font-bold tracking-wide">GIF</span>
+                  </Button>
+                </SheetTrigger>
+                <SheetContent
+                  side="bottom"
+                  className="rounded-t-2xl border-t border-border p-0 pb-[env(safe-area-inset-bottom)]"
+                >
+                  <GifPicker onSelect={handleGifSelect} className="w-full" />
+                </SheetContent>
+              </Sheet>
+            ) : (
+              <Popover open={gifPickerOpen} onOpenChange={setGifPickerOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    title="Send a GIF"
+                    disabled={uploadingMedia || uploadingVoice}
+                    className="px-2"
+                  >
+                    <span className="text-[10px] font-bold tracking-wide">GIF</span>
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent
+                  className="w-auto border-border p-0"
+                  side="top"
+                  align="start"
+                >
+                  <GifPicker onSelect={handleGifSelect} />
+                </PopoverContent>
+              </Popover>
+            ))}
+            {canPost && !(isDM && !isGroupConv) && (
               <CreatePollDialog
                 channel={isDM ? "dm" : isAnnouncements ? "announcement" : "global"}
                 conversationId={conversationIdProp}
@@ -2507,6 +2603,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                 }
               }}
               onPaste={handlePaste}
+              disabled={uploadingMedia}
               onKeyDown={(e) => {
                 // Forward keys to mention popover when open
                 if (mentionState && mentionKeyHandlerRef.current) {
@@ -2537,6 +2634,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                 }}
                 onDismiss={() => setMentionState(null)}
                 onSelect={(value) => {
+                  if (uploadingMedia || !mentionState) return;
                   const start = mentionState.start;
                   const queryLen = mentionState.query.length;
                   const before = newMessage.slice(0, start);
@@ -2795,7 +2893,8 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                   {canPost && (
                     <button
                       type="button"
-                      onClick={() => { setReplyingTo(m); close(); }}
+                      onClick={() => { if (!uploadingMedia) { setReplyingTo(m); close(); } }}
+                      disabled={uploadingMedia}
                       className="flex items-center gap-3 px-5 py-3 text-left hover:bg-muted active:bg-muted/80 transition-colors"
                     >
                       <Reply className="h-5 w-5 text-muted-foreground" />

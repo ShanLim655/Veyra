@@ -131,7 +131,7 @@ Vite serves the frontend on `http://localhost:8080` and proxies `/api` to the No
 
 ## Production on Vercel or Node.js
 
-Build the frontend with `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`, and `VITE_HCAPTCHA_SITE_KEY` set in the build environment:
+Build the frontend with `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`, `VITE_HCAPTCHA_SITE_KEY`, and optionally `VITE_GIPHY_API_KEY` (chat GIF picker; a public beta key is used when unset) set in the build environment:
 
 ```bash
 npm ci
