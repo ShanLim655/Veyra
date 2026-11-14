@@ -70,6 +70,7 @@ import { LazyFullEmojiPicker as EmojiPickerPanel } from "@/components/chat/LazyF
 import { MentionAutocomplete, type MentionCandidate } from "@/components/chat/MentionAutocomplete";
 import { GifPicker } from "@/components/chat/GifPicker";
 import type { GifItem } from "@/lib/giphy";
+import { sendGifMessage } from "@/lib/gifSend";
 import { PollCard, PollResultCard } from "@/components/chat/PollCard";
 import { CreatePollDialog } from "@/components/chat/CreatePollDialog";
 import { BarChart3, Users as UsersIcon, Settings as SettingsIcon } from "lucide-react";
@@ -1057,7 +1058,6 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
               mime: preview.file.type || "application/octet-stream",
             }));
           }
-          URL.revokeObjectURL(preview.url);
         }
         imageUrlJson = JSON.stringify(urls);
       } catch (error: any) {
@@ -1065,9 +1065,13 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
         setUploadingMedia(false);
         setLoading(false);
         // Restore composer state so user doesn't lose their work
-        setNewMessage(contentToSend);
-        setMediaPreviews(previewsToSend);
-        if (replyTarget) setReplyingTo(replyTarget);
+        if (activeConversationRef.current === conversationId) {
+          setNewMessage(contentToSend);
+          setMediaPreviews(previewsToSend);
+          if (replyTarget) setReplyingTo(replyTarget);
+        } else {
+          previewsToSend.forEach((preview) => URL.revokeObjectURL(preview.url));
+        }
         return;
       } finally {
         setUploadingMedia(false);
@@ -1132,6 +1136,13 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       pendingOutgoingMessagesRef.current.delete(tempId);
       console.error("Error sending message:", error);
       toast({ title: "Error sending message", description: error.message, variant: "destructive" });
+      if (stillActive) {
+        setNewMessage(contentToSend);
+        setMediaPreviews(previewsToSend);
+        if (replyTarget) setReplyingTo(replyTarget);
+      } else {
+        previewsToSend.forEach((preview) => URL.revokeObjectURL(preview.url));
+      }
       setMessages((prev) => prev.some((message) => message.id === tempId)
         ? prev.filter((message) => message.id !== tempId)
         : prev);
@@ -1150,6 +1161,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
         };
         return next;
       });
+      previewsToSend.forEach((preview) => URL.revokeObjectURL(preview.url));
     }
     setLoading(false);
   };
@@ -1163,38 +1175,31 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     await dispatchMessage(newMessage.trim(), mediaPreviews, replyingTo);
   };
 
-  const handleGifSelect = async (gif: GifItem) => {
+  const handleGifSelect = (gif: GifItem) => {
     setGifPickerOpen(false);
-    if (!conversationId || !user || !canPost || uploadingMedia) return;
-    // Snapshot composer state before the async download so queued previews,
-    // draft text, and the reply target are preserved exactly as the user left
-    // them. uploadingMedia blocks composer edits until dispatchMessage runs.
-    const queuedPreviews = mediaPreviews;
-    const contentToSend = newMessage.trim();
-    const replyTarget = replyingTo;
-    setUploadingMedia(true);
-    try {
-      const response = await fetch(gif.sendUrl);
-      if (!response.ok) throw new Error(`Download failed (${response.status}).`);
-      const blob = await response.blob();
-      const file = new File([blob], `${gif.id}.gif`, {
-        type: blob.type.startsWith("image/") ? blob.type : "image/gif",
-      });
-      const gifPreview: MediaPreview = {
+    setMentionState(null);
+    if (!conversationId || !user || !canPost) return;
+    void sendGifMessage(gif, {
+      state: {
+        content: newMessage.trim(),
+        previews: mediaPreviews,
+        reply: replyingTo,
+      },
+      isBusy: () => uploadingMedia,
+      setBusy: setUploadingMedia,
+      dispatch: dispatchMessage,
+      onError: (error) =>
+        toast({
+          title: "Could not send GIF",
+          description: error instanceof Error ? error.message : "Try again.",
+          variant: "destructive",
+        }),
+      createPreview: (file) => ({
         file,
         url: URL.createObjectURL(file),
         type: "image",
-      };
-      await dispatchMessage(contentToSend, [...queuedPreviews, gifPreview], replyTarget);
-    } catch (error) {
-      toast({
-        title: "Could not send GIF",
-        description: error instanceof Error ? error.message : "Try again.",
-        variant: "destructive",
-      });
-    } finally {
-      setUploadingMedia(false);
-    }
+      }),
+    });
   };
 
   const addFilesToPreview = (files: File[]) => {
@@ -1259,6 +1264,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
 
 
   const removePreview = (index: number) => {
+    if (uploadingMedia) return;
     setMediaPreviews((prev) => {
       const target = prev[index];
       if (target) URL.revokeObjectURL(target.url);
@@ -1915,7 +1921,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                         bg.style.transition = 'opacity 0.25s ease';
                         bg.style.opacity = '0';
                       }
-                      if (swipe.active && e.changedTouches[0]) {
+                      if (swipe.active && e.changedTouches[0] && !uploadingMedia) {
                         const endX = e.changedTouches[0].clientX;
                         if (endX - swipe.startX > 80) {
                           setReplyingTo(message);
@@ -2265,6 +2271,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                           variant="ghost"
                           className="h-7 w-7"
                           onClick={() => setReplyingTo(message)}
+                          disabled={uploadingMedia}
                           title="Reply"
                         >
                           <Reply className="h-4 w-4" />
@@ -2396,6 +2403,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
               variant="ghost"
               className="h-6 w-6 flex-shrink-0"
               onClick={() => setReplyingTo(null)}
+              disabled={uploadingMedia}
             >
               <X className="h-4 w-4" />
             </Button>
@@ -2471,7 +2479,8 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                     key={preset}
                     type="button"
                     onClick={() => setNewMessage(preset)}
-                    className="text-xs px-3 py-1.5 rounded-full bg-muted hover:bg-muted/70 border border-border transition-colors"
+                    disabled={uploadingMedia}
+                    className="text-xs px-3 py-1.5 rounded-full bg-muted hover:bg-muted/70 border border-border transition-colors disabled:opacity-50 disabled:pointer-events-none"
                   >
                     {preset}
                   </button>
@@ -2625,6 +2634,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                 }}
                 onDismiss={() => setMentionState(null)}
                 onSelect={(value) => {
+                  if (uploadingMedia || !mentionState) return;
                   const start = mentionState.start;
                   const queryLen = mentionState.query.length;
                   const before = newMessage.slice(0, start);
@@ -2883,7 +2893,8 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                   {canPost && (
                     <button
                       type="button"
-                      onClick={() => { setReplyingTo(m); close(); }}
+                      onClick={() => { if (!uploadingMedia) { setReplyingTo(m); close(); } }}
+                      disabled={uploadingMedia}
                       className="flex items-center gap-3 px-5 py-3 text-left hover:bg-muted active:bg-muted/80 transition-colors"
                     >
                       <Reply className="h-5 w-5 text-muted-foreground" />
