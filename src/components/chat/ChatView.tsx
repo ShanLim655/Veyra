@@ -461,29 +461,104 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       });
       return;
     }
-    
+
+    const tempId = crypto.randomUUID();
+    const stillActive = activeConversationRef.current === conversationId;
+    const localBlobUrl = URL.createObjectURL(blob);
+    const roundedDuration = Math.round(duration);
+    const localJson = JSON.stringify([`audio:${localBlobUrl}:${roundedDuration}`]);
+
+    // Show the voice message instantly with a local blob preview; the remote
+    // storage URL replaces it once the upload + insert finish.
+    const optimisticMessage: Message = {
+      id: tempId,
+      content: "",
+      sender_id: user.id,
+      created_at: new Date().toISOString(),
+      read_at: null,
+      edited_at: null,
+      image_url: localJson,
+      reply_to_id: null,
+      reactions: [],
+      sender: ownSenderProfile,
+      _status: "sending",
+    };
+    if (stillActive) {
+      setMessages((prev) => [...prev, optimisticMessage]);
+      const viewport = scrollAreaRef.current?.querySelector("[data-radix-scroll-area-viewport]") as HTMLElement | null;
+      if (viewport && viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 250) {
+        viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
+      }
+    }
+
+    const removeOptimistic = () => {
+      pendingOutgoingMessagesRef.current.delete(tempId);
+      setMessages((prev) => prev.filter((message) => message.id !== tempId));
+      URL.revokeObjectURL(localBlobUrl);
+    };
+
     setUploadingVoice(true);
     try {
       const extension = blob.type.includes('webm') ? 'webm' : 'm4a';
       const folder = isDM ? conversationIdProp : channel;
       const fileName = `${user.id}/${folder}/${Date.now()}-${Math.random().toString(36).slice(2)}.${extension}`;
-      
+
       const publicUrl = await uploadChatMedia("chat-voice", fileName, blob);
-      
+      const remoteJson = JSON.stringify([`audio:${publicUrl}:${roundedDuration}`]);
+      const signedJson = await signMessageMedia(remoteJson).catch(() => remoteJson);
+
       const insertPayload: any = {
         sender_id: user.id,
         content: "",
-        image_url: JSON.stringify([`audio:${publicUrl}:${Math.round(duration)}`]),
+        image_url: remoteJson,
       };
       if (isDM) insertPayload.conversation_id = conversationIdProp;
-      await (supabase as any).from(messagesTable).insert(insertPayload);
-      
+
+      if (stillActive) {
+        pendingOutgoingMessagesRef.current.set(tempId, {
+          content: "",
+          reply_to_id: null,
+          image_url: remoteJson,
+          created_at: Date.now(),
+        });
+      }
+      const { data, error } = await (supabase as any)
+        .from(messagesTable)
+        .insert(insertPayload)
+        .select()
+        .single();
+
+      if (error) {
+        console.error("Error sending voice message:", error);
+        toast({ title: "Error sending voice message", description: error.message, variant: "destructive" });
+        removeOptimistic();
+      } else {
+        pendingOutgoingMessagesRef.current.delete(tempId);
+        setMessages((prev) => {
+          let index = prev.findIndex((message) => message.id === tempId);
+          if (index < 0) {
+            index = prev.findIndex((message) => message.sender_id === user.id && message.image_url === localJson);
+          }
+          if (index < 0) return prev;
+          const next = prev.slice();
+          next[index] = {
+            ...prev[index],
+            ...data,
+            image_url: signedJson ?? data.image_url,
+            reactions: prev[index].reactions || [],
+            _status: "sent",
+          };
+          return next;
+        });
+        URL.revokeObjectURL(localBlobUrl);
+      }
     } catch (error: any) {
       toast({ title: "Error sending voice message", description: error.message, variant: "destructive" });
+      removeOptimistic();
     } finally {
       setUploadingVoice(false);
     }
-  }, [user, conversationId, conversationIdProp, isDM, channel, messagesTable, canPost]);
+  }, [user, conversationId, conversationIdProp, isDM, channel, messagesTable, canPost, ownSenderProfile]);
 
   const voiceRecorder = useVoiceRecorder({
     onRecordingComplete: handleVoiceRecordingComplete,
@@ -1023,7 +1098,79 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     setReplyingTo(null);
     setMediaPreviews([]);
 
-    // Upload any media first
+    const tempId = crypto.randomUUID();
+    // Media upload and composer state reads below are async — the user may
+    // have switched conversations meanwhile. The DB insert still runs (it
+    // targets this conversation via the closure), but the optimistic message
+    // and its reconciliation marker belong to this conversation's state only.
+    const stillActive = activeConversationRef.current === conversationId;
+
+    // Local preview payload: identical wire format to the remote URLs but
+    // backed by blob: object URLs, so media renders instantly while the real
+    // uploads run in the background.
+    const localUrls: string[] = previewsToSend.map((preview) => {
+      if (preview.type === "video") return `video:${preview.url}`;
+      if (preview.type === "music") {
+        return encodeMusic({ url: preview.url, name: preview.file.name, size: preview.file.size });
+      }
+      if (preview.type === "file") {
+        return encodeFile({
+          url: preview.url,
+          name: preview.file.name,
+          size: preview.file.size,
+          mime: preview.file.type || "application/octet-stream",
+        });
+      }
+      return preview.url;
+    });
+    const localImageUrlJson = previewsToSend.length ? JSON.stringify(localUrls) : null;
+
+    const optimisticMessage: Message = {
+      id: tempId,
+      content: contentToSend,
+      sender_id: user.id,
+      created_at: new Date().toISOString(),
+      read_at: null,
+      edited_at: null,
+      image_url: localImageUrlJson,
+      reply_to_id: replyTarget?.id || null,
+      reactions: [],
+      replied_message: replyTarget ? {
+        id: replyTarget.id,
+        content: replyTarget.content,
+        sender_id: replyTarget.sender_id,
+        sender: replyTarget.sender ? {
+          username: replyTarget.sender.username,
+          display_name: replyTarget.sender.display_name,
+        } : undefined,
+      } : undefined,
+      sender: ownSenderProfile,
+      _status: "sending",
+    };
+
+    if (stillActive) {
+      setMessages((prev) => [...prev, optimisticMessage]);
+      const viewport = scrollAreaRef.current?.querySelector("[data-radix-scroll-area-viewport]") as HTMLElement | null;
+      if (viewport && viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 250) {
+        viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
+      }
+    }
+
+    const dropOptimistic = () => {
+      pendingOutgoingMessagesRef.current.delete(tempId);
+      setMessages((prev) => prev.filter((message) => message.id !== tempId));
+    };
+    const restoreComposer = () => {
+      if (activeConversationRef.current === conversationId) {
+        setNewMessage(contentToSend);
+        setMediaPreviews(previewsToSend);
+        if (replyTarget) setReplyingTo(replyTarget);
+      } else {
+        previewsToSend.forEach((preview) => URL.revokeObjectURL(preview.url));
+      }
+    };
+
+    // Upload any media, then insert. The optimistic message is already visible.
     let imageUrlJson: string | null = null;
     if (previewsToSend.length > 0) {
       setUploadingMedia(true);
@@ -1064,51 +1211,17 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
         toast({ title: "Error uploading media", description: error.message, variant: "destructive" });
         setUploadingMedia(false);
         setLoading(false);
-        // Restore composer state so user doesn't lose their work
-        if (activeConversationRef.current === conversationId) {
-          setNewMessage(contentToSend);
-          setMediaPreviews(previewsToSend);
-          if (replyTarget) setReplyingTo(replyTarget);
-        } else {
-          previewsToSend.forEach((preview) => URL.revokeObjectURL(preview.url));
-        }
+        dropOptimistic();
+        restoreComposer();
         return;
       } finally {
         setUploadingMedia(false);
       }
     }
 
-    const tempId = crypto.randomUUID();
     // Signing is best-effort — never let it block sending the message.
     const optimisticImageUrl = imageUrlJson ? await signMessageMedia(imageUrlJson).catch(() => imageUrlJson) : null;
-    const optimisticMessage: Message = {
-      id: tempId,
-      content: contentToSend,
-      sender_id: user.id,
-      created_at: new Date().toISOString(),
-      read_at: null,
-      edited_at: null,
-      image_url: optimisticImageUrl,
-      reply_to_id: replyTarget?.id || null,
-      reactions: [],
-      replied_message: replyTarget ? {
-        id: replyTarget.id,
-        content: replyTarget.content,
-        sender_id: replyTarget.sender_id,
-        sender: replyTarget.sender ? {
-          username: replyTarget.sender.username,
-          display_name: replyTarget.sender.display_name,
-        } : undefined,
-      } : undefined,
-      sender: ownSenderProfile,
-      _status: "sending",
-    };
 
-    // Media upload and signing above are async — the user may have switched
-    // conversations meanwhile. The DB insert below must still run (it targets
-    // this conversation via the closure), but the optimistic message and its
-    // reconciliation marker belong to this conversation's state only.
-    const stillActive = activeConversationRef.current === conversationId;
     if (stillActive) {
       pendingOutgoingMessagesRef.current.set(tempId, {
         content: contentToSend,
@@ -1116,7 +1229,6 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
         image_url: imageUrlJson || null,
         created_at: Date.now(),
       });
-      setMessages((prev) => [...prev, optimisticMessage]);
     }
 
     const insertPayload: any = {
@@ -1133,30 +1245,27 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       .single();
 
     if (error) {
-      pendingOutgoingMessagesRef.current.delete(tempId);
       console.error("Error sending message:", error);
       toast({ title: "Error sending message", description: error.message, variant: "destructive" });
-      if (stillActive) {
-        setNewMessage(contentToSend);
-        setMediaPreviews(previewsToSend);
-        if (replyTarget) setReplyingTo(replyTarget);
-      } else {
-        previewsToSend.forEach((preview) => URL.revokeObjectURL(preview.url));
-      }
-      setMessages((prev) => prev.some((message) => message.id === tempId)
-        ? prev.filter((message) => message.id !== tempId)
-        : prev);
+      dropOptimistic();
+      restoreComposer();
     } else {
       pendingOutgoingMessagesRef.current.delete(tempId);
       setMessages((prev) => {
-        const index = prev.findIndex((message) => message.id === tempId);
+        // Realtime may already have merged this message under its real id
+        // while keeping the local blob preview — match either shape.
+        let index = prev.findIndex((message) => message.id === tempId);
+        if (index < 0 && localImageUrlJson) {
+          index = prev.findIndex((message) =>
+            message.sender_id === user.id && message.image_url === localImageUrlJson);
+        }
         if (index < 0) return prev;
         const next = prev.slice();
         next[index] = {
           ...prev[index],
           ...data,
           image_url: optimisticImageUrl ?? data.image_url,
-          reactions: [],
+          reactions: prev[index].reactions || [],
           _status: "sent",
         };
         return next;
@@ -1331,6 +1440,13 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
     const existingReaction = message?.reactions?.find(
       (r) => r.user_id === user.id && r.emoji === emoji
     );
+    const previousReactions = message?.reactions || [];
+
+    const revert = () => {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === messageId ? { ...m, reactions: previousReactions } : m))
+      );
+    };
 
     if (existingReaction) {
       setMessages((prev) =>
@@ -1340,7 +1456,16 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
             : m
         )
       );
-      await supabase.from("message_reactions").delete().eq("id", existingReaction.id);
+      const { error } = await supabase
+        .from("message_reactions")
+        .delete()
+        .eq("id", existingReaction.id)
+        .eq("user_id", user.id);
+      if (error) {
+        console.error("Error removing reaction:", error);
+        revert();
+        toast({ title: "Error", description: "Failed to remove reaction", variant: "destructive" });
+      }
     } else {
       const tempReaction: Reaction = {
         id: crypto.randomUUID(),
@@ -1355,11 +1480,16 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
             : m
         )
       );
-      await supabase.from("message_reactions").insert({
+      const { error } = await supabase.from("message_reactions").insert({
         message_id: messageId,
         user_id: user.id,
         emoji,
       });
+      if (error) {
+        console.error("Error adding reaction:", error);
+        revert();
+        toast({ title: "Error", description: "Failed to add reaction", variant: "destructive" });
+      }
     }
   };
 

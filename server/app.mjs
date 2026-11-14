@@ -1,5 +1,5 @@
 import express from 'express';
-import { pool } from './db.mjs';
+import { pool, isPostgres } from './db.mjs';
 import { queryData } from './data.mjs';
 import { callRpc } from './rpc.mjs';
 import { sendTestNotification, deliverPushNotification } from './notifications.mjs';
@@ -18,7 +18,14 @@ const MAX_CHAT_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 export function createApp() {
   const app = express();
-  if (!process.env.MARIADB_USER || !process.env.MARIADB_DATABASE) throw new Error('MARIADB_USER and MARIADB_DATABASE are required.');
+  const missingDbConfig = isPostgres
+    ? !process.env.POSTGRES_USER || !process.env.POSTGRES_DATABASE
+    : !process.env.MARIADB_USER || !process.env.MARIADB_DATABASE;
+  if (missingDbConfig) {
+    throw new Error(isPostgres
+      ? 'POSTGRES_USER and POSTGRES_DATABASE are required when USE_MARIADB=false.'
+      : 'MARIADB_USER and MARIADB_DATABASE are required.');
+  }
   assertEncryptionConfig();
   if (!encryptionEnabled()) {
     console.warn('MESSAGE_ENCRYPTION_KEY is not set; message content will be stored without database encryption.');

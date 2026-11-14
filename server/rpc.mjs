@@ -1,7 +1,28 @@
 import { randomUUID } from 'node:crypto';
-import { pool } from './db.mjs';
+import { pool, isPostgres } from './db.mjs';
 import { encryptField } from './encryption.mjs';
 import { notifyNewMessage } from './notifications.mjs';
+
+// Boolean columns are BOOLEAN in PostgreSQL but tinyint(1) in MariaDB; pass
+// the right JS type per dialect (mysql2 wants 0/1, node-postgres wants bool).
+const boolParam = (value) => (isPostgres ? Boolean(value) : value ? 1 : 0);
+
+// `UPDATE ... JOIN` is MariaDB-only. PostgreSQL uses UPDATE ... FROM with the
+// join condition moved into WHERE; SET targets must be unqualified there.
+// read=true marks read (and backfills delivered_at only when unset);
+// read=false marks delivered only.
+function updateMessageReceiptsSql(read) {
+  if (!isPostgres) {
+    const sets = read
+      ? 'm.read_at = CURRENT_TIMESTAMP(3), m.delivered_at = COALESCE(m.delivered_at, CURRENT_TIMESTAMP(3))'
+      : 'm.delivered_at = CURRENT_TIMESTAMP(3)';
+    return `UPDATE messages m JOIN conversation_members cm ON cm.conversation_id = m.conversation_id SET ${sets} WHERE m.conversation_id = ? AND cm.user_id = ? AND m.sender_id <> ? AND m.${read ? 'read_at' : 'delivered_at'} IS NULL`;
+  }
+  const sets = read
+    ? 'read_at = NOW(), delivered_at = COALESCE(delivered_at, NOW())'
+    : 'delivered_at = NOW()';
+  return `UPDATE messages m SET ${sets} FROM conversation_members cm WHERE cm.conversation_id = m.conversation_id AND m.conversation_id = ? AND cm.user_id = ? AND m.sender_id <> ? AND m.${read ? 'read_at' : 'delivered_at'} IS NULL`;
+}
 
 async function adminCheck(userId, connection = pool) {
   const [rows] = await connection.execute("SELECT 1 FROM user_roles WHERE user_id = ? AND role IN ('admin','super_admin') LIMIT 1", [userId]);
@@ -107,17 +128,13 @@ export async function callRpc(userId, name, args = {}) {
     case 'mark_message_delivered': return markMessage(userId, args._message_id, 'delivered_at');
     case 'mark_conversation_read': {
       const [result] = await pool.execute(
-        `UPDATE messages m
-         JOIN conversation_members cm ON cm.conversation_id = m.conversation_id
-         SET m.read_at = CURRENT_TIMESTAMP(3),
-             m.delivered_at = COALESCE(m.delivered_at, CURRENT_TIMESTAMP(3))
-         WHERE m.conversation_id = ? AND cm.user_id = ? AND m.sender_id <> ? AND m.read_at IS NULL`,
+        updateMessageReceiptsSql(true),
         [args._conversation_id, userId, userId],
       );
       return result.affectedRows;
     }
     case 'mark_conversation_delivered': {
-      const [result] = await pool.execute('UPDATE messages m JOIN conversation_members cm ON cm.conversation_id = m.conversation_id SET m.delivered_at = CURRENT_TIMESTAMP(3) WHERE m.conversation_id = ? AND cm.user_id = ? AND m.sender_id <> ? AND m.delivered_at IS NULL', [args._conversation_id, userId, userId]);
+      const [result] = await pool.execute(updateMessageReceiptsSql(false), [args._conversation_id, userId, userId]);
       return result.affectedRows;
     }
     case 'mark_global_mentions_read': {
@@ -177,7 +194,7 @@ async function createPoll(userId, args = {}) {
     }
     await connection.execute(
       'INSERT INTO polls (id, channel, conversation_id, created_by, question, multiple_choice, ends_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [pollId, channel, conversationId, userId, encryptField(question), args._multiple_choice ? 1 : 0, endsAtDb],
+      [pollId, channel, conversationId, userId, encryptField(question), boolParam(args._multiple_choice), endsAtDb],
     );
     for (const [position, text] of options.entries()) {
       await connection.execute(
@@ -232,7 +249,7 @@ export async function ensureDirectMessage(userId, otherId) {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
-    await connection.execute('INSERT INTO conversations (id, is_group, created_by) VALUES (?, 0, ?)', [id, userId]);
+    await connection.execute('INSERT INTO conversations (id, is_group, created_by) VALUES (?, ?, ?)', [id, boolParam(false), userId]);
     await connection.execute('INSERT INTO conversation_members (id, conversation_id, user_id, role) VALUES (?, ?, ?, ?), (?, ?, ?, ?)', [randomUUID(), id, userId, 'member', randomUUID(), id, otherId, 'member']);
     await connection.commit();
     return id;
@@ -260,7 +277,7 @@ async function createGroupChat(userId, name, memberIds) {
       const [blocked] = await connection.execute('SELECT 1 FROM blocked_users WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?) LIMIT 1', [userId, memberId, memberId, userId]);
       if (blocked.length) throw new Error('A selected group member is unavailable.');
     }
-    await connection.execute('INSERT INTO conversations (id, is_group, name, created_by) VALUES (?, 1, ?, ?)', [id, String(name).trim(), userId]);
+    await connection.execute('INSERT INTO conversations (id, is_group, name, created_by) VALUES (?, ?, ?, ?)', [id, boolParam(true), String(name).trim(), userId]);
     for (const member of uniqueIds) await connection.execute('INSERT INTO conversation_members (id, conversation_id, user_id, role) VALUES (?, ?, ?, ?)', [randomUUID(), id, member, member === userId ? 'owner' : 'member']);
     await connection.commit();
     return id;
@@ -331,6 +348,9 @@ async function leaveGroup(userId, conv) {
 }
 
 async function markMessage(userId, messageId, column) {
-  const [result] = await pool.execute(`UPDATE messages m JOIN conversation_members cm ON cm.conversation_id = m.conversation_id SET m.${column} = CURRENT_TIMESTAMP(3) WHERE m.id = ? AND cm.user_id = ? AND m.sender_id <> ?`, [messageId, userId, userId]);
+  const sql = isPostgres
+    ? `UPDATE messages m SET ${column} = NOW() FROM conversation_members cm WHERE cm.conversation_id = m.conversation_id AND m.id = ? AND cm.user_id = ? AND m.sender_id <> ?`
+    : `UPDATE messages m JOIN conversation_members cm ON cm.conversation_id = m.conversation_id SET m.${column} = CURRENT_TIMESTAMP(3) WHERE m.id = ? AND cm.user_id = ? AND m.sender_id <> ?`;
+  const [result] = await pool.execute(sql, [messageId, userId, userId]);
   return result.affectedRows;
 }

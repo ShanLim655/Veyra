@@ -32,7 +32,7 @@ MariaDB, Google OAuth, and Sequenzy credentials stay on the server. The browser 
 
 ### 1. Install
 
-Use Node.js 20 or later, MariaDB 10.5 or later, and npm:
+Use Node.js 20 or later, MariaDB 10.5 or later (or PostgreSQL 14+ — see [PostgreSQL support](docs/postgres.md)), and npm:
 
 ```bash
 npm install
@@ -50,6 +50,8 @@ FLUSH PRIVILEGES;
 ```
 
 Copy `.env.example` to `.env.local` and set `MARIADB_*` values. `.env.local` is ignored by Git. For Vercel, use Layerbase's pooled connection details, set `MARIADB_SSL=true`, and keep the pool size at `1` (the server caps it at `2`). Layerbase's free MariaDB sleeps after inactivity, so its first connection can take longer while the database wakes.
+
+To run on PostgreSQL instead, set `USE_MARIADB=false` and configure `POSTGRES_*` values (plain TCP, no TLS). `npm run db:migrate` then applies `database/schema.postgres.sql`. See [docs/postgres.md](docs/postgres.md) for details and caveats.
 
 ### 3. Configure Supabase
 
@@ -105,7 +107,7 @@ Create and verify a sending domain in Sequenzy, create a company API key with `t
 
 ### 4. Create the application tables
 
-Apply `database/schema.sql` to MariaDB:
+Apply `database/schema.sql` to MariaDB (or `database/schema.postgres.sql` to PostgreSQL when `USE_MARIADB=false`):
 
 ```bash
 npm run db:migrate
@@ -159,10 +161,10 @@ The cleanup marks chat attachments older than 14 days as expired and exempts adm
 | `npm run dev` | Start Vite and the Node API |
 | `npm run build` | Build the frontend |
 | `npm start` | Serve the production frontend and API |
-| `npm run db:migrate` | Initialize the MariaDB schema |
+| `npm run db:migrate` | Initialize the database schema (MariaDB or PostgreSQL, per `USE_MARIADB`) |
 | `npm run db:encrypt:messages` | Encrypt existing plaintext message rows (`-- --dry-run` to preview) |
 | `npm run db:grant-role` | Grant/revoke a user role: `npm run db:grant-role -- <username-or-email> <user\|admin\|super_admin\|none>` |
-| `npm run db:import:legacy` | Import Supabase Postgres app tables into MariaDB |
+| `npm run db:import:legacy` | Import Supabase Postgres app tables into the configured database |
 | `npm run lint` | Run ESLint |
 | `npm test` | Run server unit tests |
 

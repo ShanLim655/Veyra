@@ -1,5 +1,5 @@
 import pg from 'pg';
-import { pool } from './db.mjs';
+import { pool, isPostgres } from './db.mjs';
 
 const { Pool } = pg;
 const sourceUrl = process.env.LEGACY_POSTGRES_URL;
@@ -22,7 +22,9 @@ function serialize(value) {
 
 try {
   await target.beginTransaction();
-  await target.query('SET FOREIGN_KEY_CHECKS = 0');
+  // MariaDB-only escape hatch; PostgreSQL enforces FKs (import order already
+  // respects them: parents are inserted before children).
+  if (!isPostgres) await target.query('SET FOREIGN_KEY_CHECKS = 0');
   for (const table of tables) {
     const [targetColumns] = await target.query(`SHOW COLUMNS FROM \`${table}\``);
     const allowed = new Set(targetColumns.map((column) => column.Field));
@@ -45,7 +47,7 @@ try {
   await target.rollback();
   throw error;
 } finally {
-  await target.query('SET FOREIGN_KEY_CHECKS = 1');
+  if (!isPostgres) await target.query('SET FOREIGN_KEY_CHECKS = 1');
   target.release();
   await source.end();
   await pool.end();
