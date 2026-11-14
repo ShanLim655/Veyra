@@ -6,9 +6,10 @@ import { cn } from "@/lib/utils";
 
 interface GifPickerProps {
   onSelect: (gif: GifItem) => void;
+  className?: string;
 }
 
-export function GifPicker({ onSelect }: GifPickerProps) {
+export function GifPicker({ onSelect, className }: GifPickerProps) {
   const [query, setQuery] = useState("");
   const [gifs, setGifs] = useState<GifItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -43,7 +44,7 @@ export function GifPicker({ onSelect }: GifPickerProps) {
   }, [query]);
 
   return (
-    <div className="flex w-[min(420px,calc(100vw-2rem))] flex-col">
+    <div className={cn("flex flex-col", className ?? "w-[min(420px,calc(100vw-2rem))]")}>
       <div className="flex items-center gap-2 border-b border-border px-3 py-2">
         <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
         <Input

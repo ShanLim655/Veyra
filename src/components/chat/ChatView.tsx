@@ -51,7 +51,7 @@ import {
   Trash2, Smile, ArrowLeft, ImagePlus, ArrowDown, Reply,
   ChevronLeft, ChevronRight, Play, Mic, Pin, Copy
 } from "lucide-react";
-import { Sheet, SheetContent } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { signMessageMedia, encodeFile, decodeFile, encodeMusic, decodeMusic } from "@/lib/mediaUrl";
 import { compressImageForUpload } from "@/lib/imageCompress";
 import { getCachedMessages, setCachedMessages } from "@/lib/chatCache";
@@ -1156,6 +1156,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
 
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (uploadingMedia) return;
     const hasText = newMessage.trim().length > 0;
     const hasMedia = mediaPreviews.length > 0;
     if (!hasText && !hasMedia) return;
@@ -1164,9 +1165,14 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
 
   const handleGifSelect = async (gif: GifItem) => {
     setGifPickerOpen(false);
-    if (!conversationId || !user || !canPost) return;
+    if (!conversationId || !user || !canPost || uploadingMedia) return;
+    // Snapshot composer state before the async download so queued previews,
+    // draft text, and the reply target are preserved exactly as the user left
+    // them. uploadingMedia blocks composer edits until dispatchMessage runs.
+    const queuedPreviews = mediaPreviews;
     const contentToSend = newMessage.trim();
     const replyTarget = replyingTo;
+    setUploadingMedia(true);
     try {
       const response = await fetch(gif.sendUrl);
       if (!response.ok) throw new Error(`Download failed (${response.status}).`);
@@ -1174,22 +1180,25 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
       const file = new File([blob], `${gif.id}.gif`, {
         type: blob.type.startsWith("image/") ? blob.type : "image/gif",
       });
-      const preview: MediaPreview = {
+      const gifPreview: MediaPreview = {
         file,
         url: URL.createObjectURL(file),
         type: "image",
       };
-      await dispatchMessage(contentToSend, [preview], replyTarget);
+      await dispatchMessage(contentToSend, [...queuedPreviews, gifPreview], replyTarget);
     } catch (error) {
       toast({
         title: "Could not send GIF",
         description: error instanceof Error ? error.message : "Try again.",
         variant: "destructive",
       });
+    } finally {
+      setUploadingMedia(false);
     }
   };
 
   const addFilesToPreview = (files: File[]) => {
+    if (uploadingMedia) return;
     const validFiles: MediaPreview[] = [];
     for (const file of files) {
       // Reject folders: zero-size with no type, or names ending in /
@@ -2491,7 +2500,28 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                 <Paperclip className="h-4 w-4" />
               )}
             </Button>
-            {canPost && (
+            {canPost && (isMobile ? (
+              <Sheet open={gifPickerOpen} onOpenChange={setGifPickerOpen}>
+                <SheetTrigger asChild>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    title="Send a GIF"
+                    disabled={uploadingMedia || uploadingVoice}
+                    className="px-2"
+                  >
+                    <span className="text-[10px] font-bold tracking-wide">GIF</span>
+                  </Button>
+                </SheetTrigger>
+                <SheetContent
+                  side="bottom"
+                  className="rounded-t-2xl border-t border-border p-0 pb-[env(safe-area-inset-bottom)]"
+                >
+                  <GifPicker onSelect={handleGifSelect} className="w-full" />
+                </SheetContent>
+              </Sheet>
+            ) : (
               <Popover open={gifPickerOpen} onOpenChange={setGifPickerOpen}>
                 <PopoverTrigger asChild>
                   <Button
@@ -2513,8 +2543,8 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                   <GifPicker onSelect={handleGifSelect} />
                 </PopoverContent>
               </Popover>
-            )}
-            {canPost && (
+            ))}
+            {canPost && !(isDM && !isGroupConv) && (
               <CreatePollDialog
                 channel={isDM ? "dm" : isAnnouncements ? "announcement" : "global"}
                 conversationId={conversationIdProp}
@@ -2564,6 +2594,7 @@ export function ChatView({ conversationId: conversationIdProp, onBack, isMobile 
                 }
               }}
               onPaste={handlePaste}
+              disabled={uploadingMedia}
               onKeyDown={(e) => {
                 // Forward keys to mention popover when open
                 if (mentionState && mentionKeyHandlerRef.current) {
