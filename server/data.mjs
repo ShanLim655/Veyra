@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { pool } from './db.mjs';
+import { pool, isPostgres } from './db.mjs';
 import { ensureDirectMessage } from './rpc.mjs';
 import { notifyNewMessage } from './notifications.mjs';
 import { cachedRead, invalidateReadCache } from './redis.mjs';
@@ -31,6 +31,12 @@ function identifier(value, columns) {
 }
 
 function normalizeTemporalValue(value, columnType) {
+  // PostgreSQL BOOLEAN columns reject integer 0/1 params; coerce them while
+  // MariaDB tinyint(1) columns keep accepting raw values.
+  if (isPostgres && /^boolean$/i.test(columnType || '') && value !== null && value !== undefined) {
+    if (value === true || value === 1 || value === '1' || value === 'true') return true;
+    if (value === false || value === 0 || value === '0' || value === 'false') return false;
+  }
   if (value == null || typeof value !== 'string' || !/^(?:date|datetime|timestamp)\b/i.test(columnType || '')) return value;
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) return value;
 
@@ -133,7 +139,6 @@ async function policy(table, userId, operation) {
     const extra = table === 'poll_options' && operation !== 'select' ? ' AND p.created_by = ?' : '';
     return { sql: `EXISTS (SELECT 1 FROM polls p WHERE p.id = t.poll_id AND (p.conversation_id IS NULL OR EXISTS (SELECT 1 FROM conversation_members cm WHERE cm.conversation_id = p.conversation_id AND cm.user_id = ?))${extra})`, args: extra ? [userId, userId] : [userId] };
   }
-  if (table === 'announcement_messages') return { sql: '1 = 1', args: [] };
   if (table === 'friend_requests') return { sql: '(sender_id = ? OR receiver_id = ?)', args: [userId, userId] };
   if (owner[table]) {
     const cols = owner[table];
@@ -163,8 +168,16 @@ function filterSql(filters, columns) {
         break;
       }
       case 'is':
-        parts.push(filter.value === null ? `${col} IS NULL` : `${col} IS ?`);
-        if (filter.value !== null) args.push(normalizeTemporalValue(filter.value, columns.get(filter.column)));
+        if (filter.value === null) {
+          parts.push(`${col} IS NULL`);
+        } else if (isPostgres) {
+          // `IS ?` is not valid PostgreSQL; IS NOT DISTINCT FROM covers all types.
+          parts.push(`${col} IS NOT DISTINCT FROM ?`);
+          args.push(normalizeTemporalValue(filter.value, columns.get(filter.column)));
+        } else {
+          parts.push(`${col} IS ?`);
+          args.push(normalizeTemporalValue(filter.value, columns.get(filter.column)));
+        }
         break;
       case 'ilike': parts.push(`LOWER(${col}) LIKE LOWER(?)`); args.push(String(filter.value).replaceAll('*', '%')); break;
       default: throw new Error(`Unsupported filter: ${filter.op}`);

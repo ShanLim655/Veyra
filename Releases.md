@@ -2,6 +2,23 @@
 
 GitHub Releases are the public update source for the Windows desktop and Android apps. A release is created by pushing a semantic version tag in the form `vMAJOR.MINOR.PATCH`, for example `v1.2.0`. The release workflow builds both apps, attaches their installers, generates `latest.json`, and publishes the release. Pull request and branch builds do not publish releases.
 
+## Veyra 1.2.4 (upcoming)
+
+Hotfix release on top of 1.2.3:
+
+- **Android update loop fix:** the update checker now reads the installed version from the native package (`App.getInfo()`) instead of the web build's `VITE_APP_VERSION`, which was unset on the deployed web app and made every 1.2.3 install believe an update was available. Versions are normalized (`v` prefix stripped) and compared numerically.
+- **Android microphone permission:** the generated Android manifest now declares `RECORD_AUDIO`/`MODIFY_AUDIO_SETTINGS`, so voice-message recording triggers the real Android runtime prompt instead of failing silently. The recorder no longer trusts the WebView Permissions API on native (which misreports `denied`) and shows actionable Settings instructions when permission is refused.
+- **Instant media sends:** images, videos, files, GIFs, and voice messages now render immediately as optimistic messages backed by local blob previews, then swap to signed remote URLs when the upload and insert finish. Failed uploads remove the optimistic message and restore the composer draft.
+- **GIF picker upgrade:** new Favorites tab (per-device, persisted in localStorage), press-and-hold or star-button favoriting with a hollow/filled yellow star, sharper `fixed_width` previews, larger mobile-friendly tiles, and improved search layout.
+- **PostgreSQL support:** setting `USE_MARIADB=false` switches the API to PostgreSQL (`POSTGRES_*` env vars, plain TCP, no TLS). `database/schema.postgres.sql` mirrors the MariaDB schema and `npm run db:migrate` picks it automatically. See `docs/postgres.md`.
+- **Reliability fixes:** reaction add/remove now rolls back the optimistic state on failure and scopes deletes to the current user; Google sign-in tolerates a concurrent first-login profile race.
+
+### Downloads (once published)
+
+- Windows: `Veyra1.2.4.exe`
+- Android: `AndroidVeyra1.2.4.apk`
+- Update metadata: `latest.json`
+
 ## Veyra 1.2.1 (upcoming)
 
 Hotfix release on top of 1.2.0:

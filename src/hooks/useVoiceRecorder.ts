@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from "react";
+import { Capacitor } from "@capacitor/core";
 
 interface UseVoiceRecorderOptions {
   onRecordingComplete?: (blob: Blob, duration: number) => void;
@@ -116,10 +117,13 @@ export function useVoiceRecorder({ onRecordingComplete, onError, onPermissionNee
       return;
     }
 
-    // Check current permission status
+    // Check current permission status. Inside the Capacitor shell the
+    // Permissions API can misreport 'denied' (the real gate is the Android
+    // runtime prompt that getUserMedia triggers), so only trust it on web.
     const currentPermission = await checkMicrophonePermission();
-    
-    if (currentPermission === 'denied') {
+    const isNative = Capacitor.isNativePlatform();
+
+    if (currentPermission === 'denied' && !isNative) {
       const errorMessage = "Microphone access was denied. Please enable it in your browser settings.";
       setError(errorMessage);
       setPermissionStatus('denied');
@@ -219,7 +223,9 @@ export function useVoiceRecorder({ onRecordingComplete, onError, onPermissionNee
       
       if (err instanceof Error) {
         if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-          errorMessage = "Microphone access denied. Please allow microphone access and try again.";
+          errorMessage = isNative
+            ? "Microphone permission was denied. Enable it in Android Settings → Apps → Veyra → Permissions → Microphone, then try again."
+            : "Microphone access denied. Please allow microphone access and try again.";
           setPermissionStatus('denied');
         } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
           errorMessage = "No microphone found on this device.";

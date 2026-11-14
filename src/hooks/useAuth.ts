@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { authRequest, getAuthChangeVersion, notifyAuthChanged, type VeyraUser } from "@/lib/authApi";
 import { setMariaDbRealtimeUserId } from "@/integrations/supabase/mariadb-realtime";
 import { clearNativeSessionToken } from "@/lib/nativeSession";
+import { clearPasswordRecoveryFlag } from "@/lib/passwordRecoveryFlag";
 
 let currentUser: VeyraUser | null | undefined;
 let loadedAuthVersion = -1;
@@ -66,6 +67,7 @@ export function useAuth() {
   const signOut = async () => {
     await authRequest("logout", {});
     await clearNativeSessionToken();
+    clearPasswordRecoveryFlag();
     notifyAuthChanged(null);
     setCurrentUser(null);
   };

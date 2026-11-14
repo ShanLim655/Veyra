@@ -171,7 +171,15 @@ async function createOrVerifyGoogleUser(profile) {
     if (!profiles.length) {
       const username = await availableGoogleUsername(connection, email);
       const displayName = String(profile.name || email.split('@')[0]).trim().slice(0, 80);
-      await connection.execute('INSERT INTO profiles (id, username, display_name, username_set) VALUES (?, ?, ?, TRUE)', [userId, username, displayName]);
+      try {
+        await connection.execute('INSERT INTO profiles (id, username, display_name, username_set) VALUES (?, ?, ?, TRUE)', [userId, username, displayName]);
+      } catch (error) {
+        // A concurrent first-login for the same account can win the profile
+        // insert; only swallow genuine duplicate-key races.
+        if (error?.code !== 'ER_DUP_ENTRY') throw error;
+        const [existing] = await connection.execute('SELECT id FROM profiles WHERE id = ? LIMIT 1', [userId]);
+        if (!existing.length) throw error;
+      }
     }
     await connection.execute("INSERT IGNORE INTO user_roles (id, user_id, role) VALUES (?, ?, 'user')", [randomUUID(), userId]);
     await connection.commit();

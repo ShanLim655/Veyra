@@ -24,6 +24,8 @@ jobs:
           CURRENT_VERSION=$(node -p "require('./package.json').version")
           if [ "$CURRENT_VERSION" != "$VERSION" ]; then npm version "$VERSION" --no-git-tag-version; fi
       - run: npm run desktop:build -- --publish never
+        env:
+          VITE_APP_VERSION: ${{ github.ref_name }}
       - uses: actions/upload-artifact@v4
         with:
           name: windows-installer
@@ -58,6 +60,7 @@ jobs:
       - run: npx cap add android && npx cap sync android
       - run: node scripts/configure-android-deeplink.mjs
       - run: node scripts/configure-android-icons.mjs
+      - run: node scripts/configure-android-permissions.mjs
       - name: Configure signing and version
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -101,8 +104,10 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           VERSION="${RELEASE_VERSION#v}"
+          WIN_SHA=$(sha256sum "release-assets/Veyra$VERSION.exe" | cut -d' ' -f1)
+          APK_SHA=$(sha256sum "release-assets/AndroidVeyra$VERSION.apk" | cut -d' ' -f1)
           cat > release-assets/latest.json <<EOF
-          {"version":"$VERSION","tag":"$RELEASE_VERSION","windows":{"file":"Veyra$VERSION.exe","url":"https://github.com/$REPOSITORY/releases/download/$RELEASE_VERSION/Veyra$VERSION.exe"},"android":{"file":"AndroidVeyra$VERSION.apk","url":"https://github.com/$REPOSITORY/releases/download/$RELEASE_VERSION/AndroidVeyra$VERSION.apk"}}
+          {"version":"$VERSION","tag":"$RELEASE_VERSION","windows":{"file":"Veyra$VERSION.exe","url":"https://github.com/$REPOSITORY/releases/download/$RELEASE_VERSION/Veyra$VERSION.exe","sha256":"$WIN_SHA"},"android":{"file":"AndroidVeyra$VERSION.apk","url":"https://github.com/$REPOSITORY/releases/download/$RELEASE_VERSION/AndroidVeyra$VERSION.apk","sha256":"$APK_SHA"}}
           EOF
       - name: Publish GitHub Release
         env:

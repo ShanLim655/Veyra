@@ -26,6 +26,7 @@ interface GiphyImageAsset {
 }
 
 interface GiphyImages {
+  fixed_width?: GiphyImageAsset;
   fixed_width_small?: GiphyImageAsset;
   downsized?: GiphyImageAsset;
   downsized_medium?: GiphyImageAsset;
@@ -45,7 +46,7 @@ function toGifItem(gif: GiphyGif): GifItem | null {
     images?.downsized?.url ||
     images?.original?.url;
   if (!gif.id || !sendUrl) return null;
-  const preview = images?.fixed_width_small;
+  const preview = images?.fixed_width || images?.fixed_width_small;
   const dims = images?.downsized_medium || images?.downsized || images?.original;
   return {
     id: gif.id,

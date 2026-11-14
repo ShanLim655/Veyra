@@ -1,5 +1,5 @@
 import express from 'express';
-import { pool } from './db.mjs';
+import { pool, isPostgres } from './db.mjs';
 import { queryData } from './data.mjs';
 import { callRpc } from './rpc.mjs';
 import { sendTestNotification, deliverPushNotification } from './notifications.mjs';
@@ -18,7 +18,14 @@ const MAX_CHAT_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 export function createApp() {
   const app = express();
-  if (!process.env.MARIADB_USER || !process.env.MARIADB_DATABASE) throw new Error('MARIADB_USER and MARIADB_DATABASE are required.');
+  const missingDbConfig = isPostgres
+    ? !process.env.POSTGRES_USER || !process.env.POSTGRES_DATABASE
+    : !process.env.MARIADB_USER || !process.env.MARIADB_DATABASE;
+  if (missingDbConfig) {
+    throw new Error(isPostgres
+      ? 'POSTGRES_USER and POSTGRES_DATABASE are required when USE_MARIADB=false.'
+      : 'MARIADB_USER and MARIADB_DATABASE are required.');
+  }
   assertEncryptionConfig();
   if (!encryptionEnabled()) {
     console.warn('MESSAGE_ENCRYPTION_KEY is not set; message content will be stored without database encryption.');
@@ -58,7 +65,10 @@ export function createApp() {
   // Public release-metadata proxy. Clients (Android WebView, desktop, web)
   // cannot always fetch GitHub release downloads directly — redirects to asset
   // hosts break CORS — so the API fetches latest.json server-side and caches it.
-  const RELEASE_METADATA_URL = 'https://github.com/ShanLim655/Veyra/releases/latest/download/latest.json';
+  // Configurable so forks/renames don't need a code change; falls back to the
+  // canonical repo's latest.json.
+  const RELEASE_METADATA_URL = process.env.RELEASE_METADATA_URL
+    || `https://github.com/${process.env.GITHUB_REPOSITORY || 'ShanLim655/Veyra'}/releases/latest/download/latest.json`;
   let releaseCache = { at: 0, body: null };
   app.get('/api/app-version', async (_req, res) => {
     try {
